@@ -210,10 +210,10 @@ def export_documents_to_excel(documents: list[dict]) -> bytes:
 
 
 def export_relations_to_excel(relations: list[dict]) -> bytes:
-    """导出传承关系为 Excel"""
+    """导出新旧关系为 Excel"""
     wb = Workbook()
     ws = wb.active
-    ws.title = "传承关系表"
+    ws.title = "新旧关系表"
 
     headers = [
         "ID", "旧文件", "旧文件文号", "关系类型", "新文件", "新文件文号",

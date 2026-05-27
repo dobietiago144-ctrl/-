@@ -230,7 +230,7 @@ for doc in all_docs:
     print(f"  已导入: 《{doc['title']}》 (ID={doc_id})")
 
 print()
-print("--- 建立传承关系 ---")
+print("--- 建立新旧关系 ---")
 
 # 自然资发〔2024〕204号 废止 国土资发〔2009〕168号
 old = get_document_by_no("国土资发〔2009〕168号")

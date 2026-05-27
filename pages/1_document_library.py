@@ -168,7 +168,7 @@ if view_doc_id:
                 st.text_area("", doc["full_text"], height=300, disabled=True, label_visibility="collapsed")
 
         st.markdown("---")
-        st.subheader("传承关系")
+        st.subheader("新旧关系")
         relations = db.get_relations_for_document(view_doc_id)
         if relations["downstream"]:
             st.markdown("**本文件被以下文件替代/废止：**")

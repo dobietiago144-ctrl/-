@@ -206,7 +206,7 @@ def get_all_titles() -> list[dict]:
 # ═══════════════════════════════════════════
 
 def create_relation(data: dict) -> int:
-    """新增传承关系"""
+    """新增新旧关系"""
     conn = get_connection()
     cols = [
         "old_document_id", "new_document_id", "relation_type",
@@ -224,7 +224,7 @@ def create_relation(data: dict) -> int:
 
 
 def update_relation(rel_id: int, data: dict):
-    """更新传承关系"""
+    """更新新旧关系"""
     conn = get_connection()
     allowed = [
         "old_document_id", "new_document_id", "relation_type",
@@ -246,7 +246,7 @@ def update_relation(rel_id: int, data: dict):
 
 
 def delete_relation(rel_id: int):
-    """删除传承关系"""
+    """删除新旧关系"""
     conn = get_connection()
     conn.execute("DELETE FROM document_relations WHERE id = ?", (rel_id,))
     conn.commit()
@@ -278,7 +278,7 @@ def get_relations_for_document(doc_id: int) -> dict:
 
 
 def get_all_relations() -> list[dict]:
-    """获取所有传承关系（含文件名，用于列表展示）"""
+    """获取所有新旧关系（含文件名，用于列表展示）"""
     conn = get_connection()
     rows = conn.execute(
         """SELECT r.*,

@@ -157,9 +157,9 @@ else:
         with st.expander("文件正文"):
             st.text_area("", doc["full_text"], height=300, disabled=True, label_visibility="collapsed")
 
-    # 传承关系
+    # 新旧关系
     st.markdown("---")
-    st.subheader("传承关系")
+    st.subheader("新旧关系")
     relations = db.get_relations_for_document(doc_id)
 
     if relations["downstream"]:

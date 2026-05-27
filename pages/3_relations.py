@@ -1,4 +1,4 @@
-"""传承关系管理页面"""
+"""新旧关系管理页面"""
 
 import streamlit as st
 import database.db as db
@@ -6,51 +6,56 @@ from config import RELATION_TYPE_OPTIONS, RELATION_CONFIDENCE_OPTIONS
 from modules.excel_io import export_relations_to_excel
 
 
-st.title("传承关系管理")
+st.title("新旧关系管理")
 
 tab1, tab2, tab3 = st.tabs(["新增关系", "关系列表", "导出关系"])
 
 # --- Tab1: 新增关系 ---
 with tab1:
-    with st.form("add_relation_form"):
-        all_docs = db.search_documents(limit=500)
-        doc_options = {f"[{d['id']}] 《{d['title']}》" + (f" ({d['document_no']})" if d.get('document_no') else ""): d["id"] for d in all_docs}
-        option_labels = list(doc_options.keys())
+    all_docs = db.search_documents(limit=500)
+    if not all_docs:
+        st.warning("文件库为空，请先在「政策文件库」页面导入文件，再建立新旧关系")
+    else:
+        with st.form("add_relation_form"):
+            doc_options = {f"[{d['id']}] 《{d['title']}》" + (f" ({d['document_no']})" if d.get('document_no') else ""): d["id"] for d in all_docs}
+            option_labels = list(doc_options.keys())
 
-        col1, col2 = st.columns(2)
-        with col1:
-            old_label = st.selectbox("旧文件（被替代/废止方）", option_labels, key="old_doc")
-        with col2:
-            new_label = st.selectbox("新文件（替代/废止方）", option_labels, key="new_doc")
+            col1, col2 = st.columns(2)
+            with col1:
+                old_label = st.selectbox("旧文件（被替代/废止方）", option_labels, key="old_doc", index=None, placeholder="请选择旧文件...")
+            with col2:
+                new_label = st.selectbox("新文件（替代/废止方）", option_labels, key="new_doc", index=None, placeholder="请选择新文件...")
 
-        if old_label and new_label and doc_options[old_label] == doc_options[new_label]:
-            st.error("新旧文件不能相同")
-        else:
-            col_a, col_b = st.columns(2)
-            with col_a:
-                relation_type = st.selectbox("关系类型", RELATION_TYPE_OPTIONS)
-                relation_date = st.text_input("关系生效日期 (YYYY-MM-DD)")
-            with col_b:
-                confidence = st.selectbox("确认程度", RELATION_CONFIDENCE_OPTIONS)
-                affected_scope = st.text_input("影响范围（如：全文/第X条）")
+            if old_label is None or new_label is None:
+                st.info("请分别选择旧文件和新文件")
+            elif doc_options[old_label] == doc_options[new_label]:
+                st.error("新旧文件不能相同")
+            else:
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    relation_type = st.selectbox("关系类型", RELATION_TYPE_OPTIONS)
+                    relation_date = st.text_input("关系生效日期 (YYYY-MM-DD)")
+                with col_b:
+                    confidence = st.selectbox("确认程度", RELATION_CONFIDENCE_OPTIONS)
+                    affected_scope = st.text_input("影响范围（如：全文/第X条）")
 
-            relation_basis = st.text_area("关系依据（如废止条款原文）", height=80)
-            notes = st.text_area("备注", height=60)
+                relation_basis = st.text_area("关系依据（如废止条款原文）", height=80)
+                notes = st.text_area("备注", height=60)
 
-            if st.form_submit_button("确认新增"):
-                data = {
-                    "old_document_id": doc_options[old_label],
-                    "new_document_id": doc_options[new_label],
-                    "relation_type": relation_type,
-                    "relation_basis": relation_basis.strip(),
-                    "relation_date": relation_date.strip(),
-                    "affected_scope": affected_scope.strip(),
-                    "confidence": confidence,
-                    "notes": notes.strip(),
-                }
-                db.create_relation(data)
-                st.success("新增关系成功")
-                st.rerun()
+                if st.form_submit_button("确认新增"):
+                    data = {
+                        "old_document_id": doc_options[old_label],
+                        "new_document_id": doc_options[new_label],
+                        "relation_type": relation_type,
+                        "relation_basis": relation_basis.strip(),
+                        "relation_date": relation_date.strip(),
+                        "affected_scope": affected_scope.strip(),
+                        "confidence": confidence,
+                        "notes": notes.strip(),
+                    }
+                    db.create_relation(data)
+                    st.success("新增关系成功")
+                    st.rerun()
 
 # --- Tab2: 关系列表 ---
 with tab2:
@@ -82,9 +87,9 @@ with tab3:
     if relations:
         excel_bytes = export_relations_to_excel(relations)
         st.download_button(
-            "下载传承关系表",
+            "下载新旧关系表",
             data=excel_bytes,
-            file_name="传承关系表.xlsx",
+            file_name="新旧关系表.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         st.success(f"共 {len(relations)} 条关系")

@@ -16,7 +16,7 @@ init_db()
 # 定义页面
 home_page = st.Page("pages/0_home.py", title="首页", icon="🏠")
 library_page = st.Page("pages/1_document_library.py", title="政策文件库", icon="📚")
-relations_page = st.Page("pages/3_relations.py", title="传承关系", icon="🔗")
+relations_page = st.Page("pages/3_relations.py", title="新旧关系", icon="🔗")
 review_page = st.Page("pages/4_review.py", title="文档审查", icon="🔍")
 history_page = st.Page("pages/5_review_history.py", title="审查历史", icon="📝")
 
