@@ -46,7 +46,13 @@ for t in tasks:
 if "view_task_id" in st.session_state and st.session_state["view_task_id"]:
     task_id = st.session_state["view_task_id"]
     st.markdown("---")
-    st.subheader("审查详情")
+    col_title, col_close = st.columns([10, 1])
+    with col_title:
+        st.subheader("审查详情")
+    with col_close:
+        if st.button("✕", key="close_detail", help="关闭详情"):
+            del st.session_state["view_task_id"]
+            st.rerun()
 
     summary = generate_review_summary(task_id)
     st.markdown(summary)

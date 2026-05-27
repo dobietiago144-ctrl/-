@@ -16,7 +16,6 @@ from modules.excel_io import (
     generate_import_template, parse_import_excel,
     export_documents_to_excel,
 )
-from modules.web_search import search_policy_online
 
 # ═══════════ 内联详情视图 ═══════════
 view_doc_id = st.session_state.get("view_doc_id", None)
@@ -198,7 +197,7 @@ with col4:
     category_filter = st.selectbox("文件类别", ["全部"] + DOC_CATEGORY_OPTIONS)
 
 # ═══════════ 操作按钮栏 ═══════════
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["导入链接", "上传文件", "新增文件", "导入 Excel", "导出 Excel", "网络搜索"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["导入链接", "上传文件", "新增文件", "导入 Excel", "导出 Excel"])
 
 # --- Tab1: 导入链接（默认） ---
 with tab1:
@@ -539,139 +538,6 @@ with tab5:
             st.success(f"共 {len(docs)} 条记录")
         else:
             st.info("没有符合条件的记录")
-
-# --- Tab6: 网络搜索入库 ---
-with tab6:
-    st.caption("输入政策名称，在线搜索并导入文件库")
-    col_s1, col_s2 = st.columns([4, 1])
-    with col_s1:
-        search_query = st.text_input("政策名称", placeholder="输入政策文件名称关键词...", key="web_search_query", label_visibility="collapsed")
-    with col_s2:
-        do_search = st.button("搜索", key="btn_web_search", type="primary")
-
-    if do_search and search_query.strip():
-        with st.spinner(f"正在搜索「{search_query.strip()}」..."):
-            st.session_state["web_search_results"] = search_policy_online(search_query.strip(), max_results=10)
-        if not st.session_state.get("web_search_results"):
-            st.warning("未搜索到结果，请尝试更换关键词")
-        st.rerun()
-
-    # 显示搜索结果
-    search_results = st.session_state.get("web_search_results", None)
-    if search_results:
-        st.markdown(f"**搜索到 {len(search_results)} 条结果：**")
-
-        for i, item in enumerate(search_results):
-            with st.container():
-                st.markdown(f"**{i+1}. [{item['title']}]({item['url']})**")
-                st.caption(f"{item['snippet'][:200]}  |  来源: {item['source']}")
-                col_fetch, _ = st.columns([1, 5])
-                with col_fetch:
-                    if st.button("抓取", key=f"ws_fetch_{i}"):
-                        st.session_state["web_fetch_url"] = item["url"]
-                        st.session_state["web_fetch_title"] = item["title"]
-                        st.rerun()
-            st.markdown("---")
-
-        if st.button("清除搜索结果", key="clear_web_search"):
-            del st.session_state["web_search_results"]
-            st.rerun()
-
-    # 抓取选中的结果
-    fetch_url = st.session_state.get("web_fetch_url", None)
-    if fetch_url:
-        st.markdown("---")
-        st.info(f"正在抓取：{st.session_state.get('web_fetch_title', '')}")
-        with st.spinner("抓取中..."):
-            result = fetch_from_url(fetch_url)
-        if result["error"]:
-            st.error(f"抓取失败: {result['error']}")
-            if st.button("返回搜索结果"):
-                del st.session_state["web_fetch_url"]
-                st.rerun()
-        elif not result["text"].strip():
-            st.warning("未能提取到有效文本")
-            if st.button("返回搜索结果"):
-                del st.session_state["web_fetch_url"]
-                st.rerun()
-        else:
-            text = result["text"]
-            meta = extract_all_metadata(text)
-            st.success(f"抓取成功，共 {len(text)} 字符")
-
-            with st.container(border=True):
-                st.markdown("**识别结果：**")
-                cols = st.columns(4)
-                with cols[0]:
-                    st.metric("标题", meta.get("title", "未识别")[:20] or "未识别")
-                with cols[1]:
-                    st.metric("文号", meta.get("document_no", "未识别") or "未识别")
-                with cols[2]:
-                    st.metric("发文单位", meta.get("issuing_authority", "未识别") or "未识别")
-                with cols[3]:
-                    st.metric("发布日期", meta.get("publish_date", "未识别") or "未识别")
-
-            with st.expander("查看正文 / 修改信息并入库"):
-                st.text_area("正文预览", text[:5000], height=200, disabled=True, label_visibility="collapsed")
-                with st.form("web_import_form"):
-                    title = st.text_input("文件名称 *", value=meta.get("title", ""))
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        doc_no = st.text_input("文号", value=meta.get("document_no", "") or "")
-                        authority = st.text_input("发文单位", value=meta.get("issuing_authority", "") or "")
-                        pub_date = st.text_input("发布日期", value=meta.get("publish_date", "") or "")
-                    with c2:
-                        eff_date = st.text_input("实施日期", value=meta.get("effective_date", "") or "")
-                        exp_date = st.text_input("失效日期", value=meta.get("expiry_date", "") or "")
-                        s = meta.get("status", "待核实")
-                        st_idx = DOC_STATUS_OPTIONS.index(s) if s in DOC_STATUS_OPTIONS else DOC_STATUS_OPTIONS.index("待核实")
-                        status = st.selectbox("文件状态", DOC_STATUS_OPTIONS, index=st_idx)
-                    region = st.selectbox("适用地区", REGION_OPTIONS)
-                    suggested_cat = classify_document(meta.get("title", ""), meta.get("document_no", ""), text)
-                    cat_idx = DOC_CATEGORY_OPTIONS.index(suggested_cat) if suggested_cat in DOC_CATEGORY_OPTIONS else DOC_CATEGORY_OPTIONS.index("其他")
-                    category = st.selectbox("文件类别", DOC_CATEGORY_OPTIONS, index=cat_idx)
-                    keywords = st.text_input("关键词")
-                    notes = st.text_input("备注")
-
-                    cfb, cfb2, cfb3 = st.columns([1, 1, 4])
-                    with cfb:
-                        confirmed = st.form_submit_button("确认入库")
-                    with cfb2:
-                        cancel = st.form_submit_button("取消")
-
-                    if confirmed:
-                        if not title.strip():
-                            st.error("文件名称不能为空")
-                        else:
-                            data = {
-                                "title": title.strip(),
-                                "document_no": doc_no.strip() if doc_no else "",
-                                "issuing_authority": authority.strip() if authority else "",
-                                "publish_date": pub_date.strip() if pub_date else "",
-                                "effective_date": eff_date.strip() if eff_date else "",
-                                "expiry_date": exp_date.strip() if exp_date else "",
-                                "status": status,
-                                "region": region,
-                                "category": category,
-                                "keywords": keywords.strip() if keywords else "",
-                                "full_text": text,
-                                "source_type": "网络搜索",
-                                "source_url": fetch_url,
-                                "confirmed": 1,
-                                "notes": notes.strip() if notes else "",
-                            }
-                            doc_id = db.create_document(data)
-                            st.success(f"《{title.strip()}》入库成功！ID: {doc_id}")
-                            for k in ["web_search_results", "web_fetch_url", "web_fetch_title"]:
-                                if k in st.session_state:
-                                    del st.session_state[k]
-                            st.rerun()
-
-                    if cancel:
-                        for k in ["web_search_results", "web_fetch_url", "web_fetch_title"]:
-                            if k in st.session_state:
-                                del st.session_state[k]
-                        st.rerun()
 
 # ═══════════ 文件列表 ═══════════
 st.markdown("---")

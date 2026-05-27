@@ -120,38 +120,69 @@ def extract_title(text: str) -> str:
         if val and len(val) >= 8 and ("通知" in val or "办法" in val or "规定" in val or "关于" in val):
             return val[:120]
 
-    # 2. "关于印发《...》" 格式（标题行特征：含"印发"+"书名号"）
+    # 2. "关于印发《...》" 格式
     for line in lines:
         if re.search(r"关于印发[《〈].+?[》〉]", line):
             return line[:120]
 
-    # 3. 独立短标题行（如"节约集约利用土地规定"）——优先于书名号匹配
+    # 3. 文件名中的标题：从文件名行识别（如"土地复垦质量控制标准.pdf"中的书名号内容）
     for line in lines:
-        if 6 <= len(line) <= 50 and any(line.endswith(kw) for kw in
-            ["规定", "办法", "条例", "规则", "标准", "细则", "方案", "法"]):
-            if not any(s in line for s in ["下载", "http", "附件", "版权所有"]):
-                return line[:120]
+        m = re.search(r"[《〈](.+?)[》〉]\s*(?:\.pdf|\.docx?)?", line)
+        if m:
+            candidate = m.group(1).strip()
+            if 2 <= len(candidate) <= 80:
+                return candidate
 
-    # 4. 有书名号且看起来是标题的短行（排除正文长句）
+    # 4. 独立短标题行，优先非"中华人民共和国"开头和非"行业标准"结尾
+    title_keywords = ["规定", "办法", "条例", "规则", "标准", "细则", "方案", "法",
+                      "规范", "规程", "指南", "通知", "意见", "决定"]
+    # 先收集所有候选标题
+    candidates = []
     for line in lines:
-        if re.search(r"[《〈].+?[》〉]", line) and 10 <= len(line) <= 100:
-            if any(kw in line for kw in ["通知", "办法", "规定", "条例", "意见", "方案"]):
-                return line[:120]
+        if not (6 <= len(line) <= 80):
+            continue
+        if any(s in line for s in ["下载", "http", "附件", "版权所有", "ICS", "点击此处"]):
+            continue
+        if line.startswith("中华人民共和国") or line.startswith("目 ") or line.startswith("目\t"):
+            continue
+        if re.match(r"^[A-Z]{2,}[/\s]", line):  # 编号行
+            continue
+        if re.match(r"^\d+[.\s]", line):  # 数字编号开头
+            continue
+        if any(line.endswith(kw) for kw in title_keywords):
+            candidates.append((line, 2))  # 高优先级：以关键词结尾
+        elif re.search(r"[《〈].+[》〉]", line) and len(line) <= 100:
+            m2 = re.search(r"[《〈](.+?)[》〉]", line)
+            inner = m2.group(1).strip()
+            if 3 <= len(inner) <= 80:
+                candidates.append((inner, 1))
 
-    # 5. 回退: 第一个书名号行（排除含"第X条"的正文行）
+    if candidates:
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return candidates[0][0][:120]
+
+    # 5. 回退：不含"中华人民共和国"前缀的非编号短行
     for line in lines:
-        m = re.search(r"[《〈](.+?)[》〉]", line)
-        if m and len(m.group(1)) >= 3:
-            if not re.search(r"第[一二三四五六七八九十\d]+条", line):
-                return line[:120]
+        if 6 <= len(line) <= 50:
+            if line.startswith("中华人民共和国"):
+                continue
+            if re.match(r"^[A-Z]{2,}[/\s]", line):
+                continue
+            candidate = line
+            # 去掉末尾的文件扩展名
+            candidate = re.sub(r"\.(pdf|docx?|xlsx?|txt)$", "", candidate)
+            return candidate[:120]
 
-    return lines[0][:80]
+    return lines[0][:80] if lines else ""
 
 
 def extract_document_no(text: str) -> str:
     """提取文号"""
+    # 预处理：合并被换行拆分的多行文号（如 TD/T\n1036—2013）
+    text_merged = re.sub(r"([A-Z]{2,}/[A-Z]*)\s*\n\s*(\d{4}[—\-]\d{4})", r"\1 \2", text)
+
     # 1. 从"文号"标签取
-    val = _extract_label_value(text, "文号") or _extract_label_value(text, "发文字号")
+    val = _extract_label_value(text_merged, "文号") or _extract_label_value(text_merged, "发文字号")
     if val and re.search(r"[〔\(（]\d{4}[〕\)）]", val):
         m = re.search(r".*?([\w一-鿿]+[〔\(（]\d{4}[〕\)）]\d+号?)", val)
         if m:
@@ -160,12 +191,14 @@ def extract_document_no(text: str) -> str:
 
     # 2. 全文正则
     for pattern in DOCUMENT_NO_PATTERNS:
-        m = re.search(pattern, text)
+        m = re.search(pattern, text_merged)
         if m:
             no = m.group(0).strip()
             # 去掉前面的杂字符和前面的单个"日"字（常来自"X月X日"的尾巴）
             no = re.sub(r"^[^\w一-鿿〔\(（]+", "", no)
             no = re.sub(r"^日(?=[一-鿿]+(?:令|发|函|公告|[〔\(（]))", "", no)
+            # 清除内部换行
+            no = no.replace("\n", "").replace("\r", "")
             return no
     return ""
 
@@ -177,46 +210,57 @@ def extract_issuing_authority(text: str) -> str:
     # 1. "发布机构" 标签取值
     val = _extract_label_value(text, "发布机构") or _extract_label_value(text, "发文单位")
     if val:
-        # 尝试匹配机构名模式
         m = re.search(r"([一-鿿]{2,10}(?:部|厅|局|委|办|院|署))", val)
         if m:
             return m.group(1)
         if re.search(r"(部|厅|局|委|办|院|署|中心)$", val) and 2 <= len(val) <= 10:
             return val
 
-    # 2. 在"发布机构"标签后几行内找机构名
+    # 2. 标准文档格式：机构名独占一行，下一行是"发布"
+    for i, line in enumerate(lines):
+        if line == "发布" and i > 0:
+            prev = lines[i - 1]
+            # 允许 OCR 缺失"华"字的情况（中国人民共和国 → 中华人民共和国）
+            prev_clean = prev.replace("中国人民共和国", "中华人民共和国")
+            m = re.search(r"([一-鿿]{2,12}(?:部|厅|局|委|办|院|署|会))", prev_clean)
+            if m:
+                return m.group(1)
+            if 4 <= len(prev) <= 20:
+                return prev
+
+    # 3. 在"发布机构"标签后几行内找机构名
     for lbl in ["发布机构", "发文单位"]:
         idx = text.find(lbl)
         if idx >= 0:
             tail = text[idx + len(lbl):idx + len(lbl) + 300]
-            # 找最短的机构名（排除文档编号行和标题行）
             candidates = re.findall(r"\b([一-鿿]{2,8}(?:部|厅|局|委|办|院))\b", tail)
             for c in candidates:
                 if c not in _META_LABELS and "规" not in c and "号" not in c:
                     return c
 
-    # 3. 在全文头部找"印发"附近的机构名
+    # 4. 在全文头部找"印发"/"发布"附近的机构名
     for m in re.finditer(r"([一-鿿]{2,8}(?:部|厅|局|委|办|院))", text[:800]):
         c = m.group(0)
         pos = m.start()
         ctx = text[max(0, pos - 40):pos + len(c) + 5]
-        if "印发" in ctx or ("发布" in ctx and "发布日期" not in ctx):
+        if "印发" in ctx or "发布" in ctx:
             return c
 
-    # 4. 取头部出现的第一个短机构名
+    # 5. 取头部出现的第一个短机构名
     candidates = re.findall(r"\b([一-鿿]{2,8}(?:部|厅|局|委|办|院))\b", text[:800])
     for c in candidates:
         if c not in _META_LABELS and len(c) <= 6:
             return c
 
-    # 5. 兜底：从页面分类行提取，如 "中华人民共和国自然资源部规章" → "自然资源部"
-    first_line = text.split("\n")[0].strip()
-    m = re.match(r"中华人民共和国(.{2,8}(?:部|厅|局|委|办|院))", first_line)
-    if m:
-        return m.group(1)
-    m = re.search(r"([一-鿿]{2,8}(?:部|厅|局|委|办|院))(?:规章|法规|文件)", first_line)
-    if m:
-        return m.group(1)
+    # 6. 兜底：从行中提取 "中华人民共和国XXX部规章" → "XXX部"
+    for line in lines[:10]:
+        line_clean = line.replace("中国人民共和国", "中华人民共和国")
+        m = re.match(r"中华人民共和国(.{2,8}(?:部|厅|局|委|办|院))", line_clean)
+        if m:
+            return m.group(1)
+        m = re.search(r"([一-鿿]{2,8}(?:部|厅|局|委|办|院))(?:规章|法规|文件)", line_clean)
+        if m:
+            return m.group(1)
 
     return ""
 
@@ -225,11 +269,14 @@ def extract_dates(text: str) -> dict:
     """提取日期信息"""
     result = {"publish_date": "", "effective_date": ""}
 
+    # 日期正则：允许分隔符前后有空格（如 2013 -01 - 23）
+    date_re = re.compile(r"(\d{4})\s*[年/\-.—―－—\-]\s*(\d{1,2})\s*[月/\-.—―－—\-]\s*(\d{1,2})\s*日?")
+
     # 1. 从标签取
     for lbl in ["发布日期", "发布时间", "成文日期"]:
         val = _extract_label_value(text, lbl)
         if val:
-            m = re.search(r"(\d{4})\D+(\d{1,2})\D+(\d{1,2})", val)
+            m = date_re.search(val)
             if m:
                 y, mo, d = m.groups()
                 result["publish_date"] = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
@@ -238,15 +285,29 @@ def extract_dates(text: str) -> dict:
     for lbl in ["实施日期", "施行日期", "生效日期"]:
         val = _extract_label_value(text, lbl)
         if val:
-            m = re.search(r"(\d{4})\D+(\d{1,2})\D+(\d{1,2})", val)
+            m = date_re.search(val)
             if m:
                 y, mo, d = m.groups()
                 result["effective_date"] = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
                 break
 
-    # 2. 全文日期列表
+    # 2. "发布"行：匹配 "2013 -01 - 23 发布" 格式
+    if not result["publish_date"]:
+        for m in re.finditer(r"(\d{4})\s*[年/\-.——\-]\s*(\d{1,2})\s*[月/\-.——\-]\s*(\d{1,2})\s*日?\s*(?:发布|施行|实施)", text[:MAX_SCAN_CHARS]):
+            y, mo, d = m.groups()
+            result["publish_date"] = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+            break
+
+    # 3. "实施"行
+    if not result["effective_date"]:
+        for m in re.finditer(r"(\d{4})\s*[年/\-.——\-]\s*(\d{1,2})\s*[月/\-.——\-]\s*(\d{1,2})\s*日?\s*(?:实施|施行|执行|生效)", text[:MAX_SCAN_CHARS]):
+            y, mo, d = m.groups()
+            result["effective_date"] = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+            break
+
+    # 4. 全文日期列表（兜底）
     dates = []
-    for m in re.finditer(r"(\d{4})[年/\-.](\d{1,2})[月/\-.](\d{1,2})日?", text[:MAX_SCAN_CHARS]):
+    for m in date_re.finditer(text[:MAX_SCAN_CHARS]):
         y, mo, d = m.groups()
         dates.append(f"{int(y):04d}-{int(mo):02d}-{int(d):02d}")
         if len(dates) >= 5:
@@ -257,8 +318,8 @@ def extract_dates(text: str) -> dict:
     if not result["effective_date"] and len(dates) > 1:
         result["effective_date"] = dates[1]
 
-    # 3. "自...施行"句式覆盖
-    m = re.search(r"自(\d{4})\D+(\d{1,2})\D+(\d{1,2})\D+(?:施行|实施|执行|生效)", text)
+    # 5. "自...施行"句式覆盖
+    m = re.search(r"自\s*(\d{4})\s*[年/\-.——\-]\s*(\d{1,2})\s*[月/\-.——\-]\s*(\d{1,2})\s*日?\s*(?:施行|实施|执行|生效)", text[:MAX_SCAN_CHARS])
     if m:
         y, mo, d = m.groups()
         result["effective_date"] = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
