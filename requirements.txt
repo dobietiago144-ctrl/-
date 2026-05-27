@@ -1,0 +1,8 @@
+streamlit>=1.36
+python-docx>=0.8.11
+PyMuPDF>=1.23.0
+openpyxl>=3.1.0
+pandas>=2.0.0
+rapidfuzz>=3.0.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0

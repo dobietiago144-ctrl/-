@@ -1,0 +1,15 @@
+Line 0: [中华人民共和国自然资源部规章] ends_with_规定=False len=14
+Line 1: [下载文字版] ends_with_规定=False len=5
+Line 2: [https://gk.mnr.gov.cn/images/jyjylytdgd.pdf] ends_with_规定=False len=43
+Line 3: [下载图片版] ends_with_规定=False len=5
+Line 4: [https://gk.mnr.gov.cn/images/jyjylytdgd.pdf] ends_with_规定=False len=43
+Line 5: [节约集约利用土地规定] ends_with_规定=True len=10
+Line 6: [（2014年5月22日国土资源部令第61号公布 根据2019年7月16日自然资源部第2次部务会议《自然资源部关于第一批废止和修改的部门规章的决定》修正 自2014年9月1日起实施）] ends_with_规定=False len=90
+Line 7: [第一章 总则] ends_with_规定=False len=6
+Line 8: [第一条] ends_with_规定=False len=3
+Line 9: [为贯彻十分珍惜、合理利用土地和切实保护耕地的基本国策，落实最严格的耕地保护制度和最严格的节约集约用地制度，提升土地资源对经济社会发展的承载能力，促进生态文明建设，根据《中华人民共和国土地管理法》和《国] ends_with_规定=False len=123
+Line 10: [第二条] ends_with_规定=False len=3
+Line 11: [本规定所称节约集约利用土地，是指通过规模引导、布局优化、标准控制、市场配置、盘活利用等手段，达到节约土地、减量用地、提升用地强度、促进低效废弃地再利用、优化土地利用结构和布局、提高土地利用效率的各项行] ends_with_规定=False len=105
+Line 12: [第三条] ends_with_规定=False len=3
+Line 13: [土地管理和利用应当遵循下列原则：] ends_with_规定=False len=16
+Line 14: [（一）坚持节约优先的原则，各项建设少占地、不占或者少占耕地，珍惜和合理利用每一寸土地；] ends_with_规定=False len=43

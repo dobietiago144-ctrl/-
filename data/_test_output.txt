@@ -1,0 +1,14 @@
+=== URL1
+  title:          自然资源部关于印发《城镇开发边界管理办法（试行）》的通知
+  document_no:    自然资规〔2026〕1号
+  authority:      自然资源部
+  publish_date:   2026-02-28
+  effective_date: 2026-02-11
+
+=== URL2
+  title:          节约集约利用土地规定
+  document_no:    国土资源部令第61号
+  authority:      自然资源部
+  publish_date:   2014-05-22
+  effective_date: 2014-09-01
+

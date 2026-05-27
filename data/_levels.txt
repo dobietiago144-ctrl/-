@@ -1,0 +1,58 @@
+id   current_cat  page_level           title
+--------------------------------------------------------------------------------
+2    法律           NOT_FOUND            中华人民共和国土地管理法
+      URL: https://fszrzy.foshan.gov.cn/zwgk/ztzl/bdcdj/bdcxgzc/content
+3    行政法规         NOT_FOUND            中华人民共和国土地管理法实施条例
+      URL: https://www.gov.cn/zhengce/content/2021-07/30/content_562876
+4    部门规章         NOT_FOUND            永久基本农田保护红线管理办法
+      URL: http://cz.dnr.gxzf.gov.cn/zwgk/zcfg/gjjflfgzc/t26020023.shtm
+5    规范性文件        NOT_FOUND            自然资源部 农业农村部关于改革完善耕地占补平衡管理的通知
+      URL: https://www.moa.gov.cn/govpublic/ntjsgls/202411/t20241107_64
+7    规范性文件        NOT_FOUND            城乡建设用地增减挂钩试点管理办法
+      URL: https://gk.mnr.gov.cn/zc/zxgfxwj/201702/t20170206_1436480.ht
+8    规范性文件        NOT_FOUND            巩固拓展脱贫攻坚成果同乡村振兴有效衔接过渡期内城乡建设用地增减挂钩节余指标跨省域
+      URL: https://www.mnr.gov.cn/gk/tzgg/202112/t20211231_2717467.html
+9    部门规章         NOT_FOUND            节约集约利用土地规定
+      URL: https://gk.mnr.gov.cn/zc/gz/201908/t20190813_2458552.html
+10   地方性法规        NOT_FOUND            广东省土地管理条例
+      URL: http://nr.gd.gov.cn/gkmlpt/content/3/3979/post_3979057.html
+11   规范性文件        NOT_FOUND            广东省自然资源厅关于进一步规范征收土地工作的通知
+      URL: https://nr.gd.gov.cn/gkmlpt/content/4/4645/post_4645906.html
+12   规范性文件        NOT_FOUND            广东省自然资源厅关于进一步规范土地征收成片开发工作的通知
+      URL: https://nr.gd.gov.cn/gkmlpt/content/4/4645/post_4645904.html
+13   规范性文件        NOT_FOUND            广东省自然资源厅关于进一步规范国有建设用地使用权出让管理相关工作的通知
+      URL: https://nr.gd.gov.cn/zwgknew/zcfg/zcfg/content/post_4590763.
+14   法律           NOT_FOUND            中华人民共和国城乡规划法
+      URL: https://www.gov.cn
+15   法律           NOT_FOUND            中华人民共和国农村土地承包法
+      URL: https://www.gov.cn
+16   法律           NOT_FOUND            中华人民共和国矿产资源法
+      URL: https://www.gov.cn
+17   法律           NOT_FOUND            中华人民共和国环境保护法
+      URL: https://www.gov.cn
+18   行政法规         NOT_FOUND            基本农田保护条例
+      URL: https://www.gov.cn
+19   行政法规         NOT_FOUND            土地复垦条例
+      URL: https://www.gov.cn
+20   行政法规         NOT_FOUND            不动产登记暂行条例
+      URL: https://www.gov.cn
+21   行政法规         NOT_FOUND            地质灾害防治条例
+      URL: https://www.gov.cn
+22   部门规章         NOT_FOUND            闲置土地处置办法
+      URL: https://www.mnr.gov.cn
+23   部门规章         NOT_FOUND            建设项目用地预审管理办法
+      URL: https://www.mnr.gov.cn
+24   部门规章         NOT_FOUND            土地权属争议调查处理办法
+      URL: https://www.mnr.gov.cn
+25   规范性文件        NOT_FOUND            自然资源部 农业农村部 国家林业和草原局关于严格耕地用途管制有关问题的通知
+      URL: https://www.mnr.gov.cn
+26   规范性文件        NOT_FOUND            自然资源部办公厅关于进一步规范临时用地管理的通知
+      URL: https://www.mnr.gov.cn
+27   规范性文件        NOT_FOUND            自然资源部关于进一步做好用地用海要素保障的通知
+      URL: https://www.mnr.gov.cn
+28   技术标准         NOT_FOUND            土地利用现状分类
+      URL: https://std.samr.gov.cn
+29   技术标准         NOT_FOUND            高标准农田建设 通则
+      URL: https://std.samr.gov.cn
+30   规范性文件        NOT_FOUND            广东省耕地保护经济补偿办法
+      URL: https://nr.gd.gov.cn
