@@ -9,11 +9,18 @@ def assess_risk(match_result: dict) -> dict:
     risk_level = "提醒"
     judgment = ""
     need_confirm = match_result.get("need_manual_confirm", False)
+    web_results = match_result.get("web_results", [])
 
     if match_result["match_method"] == "未匹配":
-        risk_level = "提醒"
-        judgment = "文件库中未找到该依据，建议人工核查是否需要补充入库"
-        need_confirm = True
+        if web_results:
+            risk_level = "提醒"
+            sources = [r.get("source", "") for r in web_results[:3]]
+            judgment = f"文件库中未找到该依据，网络检索发现 {len(web_results)} 条相关结果（{', '.join(sources)}），建议人工核实后入库"
+            need_confirm = True
+        else:
+            risk_level = "提醒"
+            judgment = "文件库中未找到该依据，网络检索也未发现结果，建议人工核查是否需要补充入库"
+            need_confirm = True
     else:
         status = match_result.get("document_status", "")
         risk_level = STATUS_TO_RISK.get(status, "提醒")

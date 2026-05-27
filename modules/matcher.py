@@ -1,4 +1,4 @@
-"""三级匹配器：文号精确匹配 → 标题精确匹配 → 模糊匹配"""
+"""三级匹配器：文号精确匹配 → 标题精确匹配 → 模糊匹配 → 网络检索"""
 
 from rapidfuzz import fuzz, process
 
@@ -114,9 +114,30 @@ def match_reference(reference: dict) -> dict:
 
 
 def match_all_references(references: list[dict]) -> list[dict]:
-    """对全部引用依据执行匹配，返回带匹配结果的列表"""
+    """对全部引用依据执行匹配，返回带匹配结果的列表
+    匹配优先级：本地文件库优先，未匹配时尝试网络检索"""
     results = []
     for ref in references:
         match_result = match_reference(ref)
+        # 如果本地未匹配，尝试网络检索
+        if match_result["match_method"] == "未匹配":
+            web_results = _search_web_for_ref(ref)
+            match_result["web_results"] = web_results
+        else:
+            match_result["web_results"] = []
         results.append({**ref, **match_result})
     return results
+
+
+def _search_web_for_ref(reference: dict) -> list[dict]:
+    """对未匹配的引用，通过网络检索补充"""
+    query = reference.get("title", "") or reference.get("text", "")
+    if not query or len(query) < 3:
+        return []
+
+    try:
+        from modules.web_search import search_policy_online
+        results = search_policy_online(query, max_results=5)
+        return results
+    except Exception:
+        return []
