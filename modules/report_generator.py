@@ -13,6 +13,7 @@ def generate_review_summary(task_id: int) -> str:
         return "未找到审查任务"
 
     total = len(results)
+    severe = sum(1 for r in results if r["risk_level"] == "严重问题")
     high = sum(1 for r in results if r["risk_level"] == "高风险")
     medium = sum(1 for r in results if r["risk_level"] == "中风险")
     low = sum(1 for r in results if r["risk_level"] == "低风险")
@@ -24,14 +25,19 @@ def generate_review_summary(task_id: int) -> str:
         f"审查时间：{task.get('created_at', '')}",
         f"本次共识别引用依据 {total} 项。",
         f"其中：",
-        f"- 现行有效 {normal} 项；",
-        f"- 已废止/已失效 {high} 项；",
-        f"- 存在新版替代/部分废止 {medium} 项；",
-        f"- 待人工核查/提醒 {remind} 项。",
+        f"- 现行有效/正常 {normal} 项；",
+        f"- 严重问题（已废止/已失效/文号不一致）{severe} 项；",
+        f"- 高风险（被替代且存在替代文件）{high} 项；",
+        f"- 中风险（部分废止/待确认）{medium} 项；",
+        f"- 低风险（即将失效/格式提醒）{low} 项；",
+        f"- 提醒（未收录/模糊匹配）{remind} 项。",
     ]
-    if high > 0 or medium > 0:
+    if severe > 0 or high > 0:
         lines.append("")
-        lines.append("总体判断：该文档存在政策依据更新不及时问题，建议对高风险和中风险依据进行修改后再提交审查。")
+        lines.append("总体判断：该文档存在严重或高风险政策依据问题，必须修改后再提交审查。")
+    elif medium > 0:
+        lines.append("")
+        lines.append("总体判断：该文档存在部分政策依据需要更新，建议修改后再提交审查。")
     else:
         lines.append("")
         lines.append("总体判断：该文档引用的政策依据基本现行有效。")

@@ -43,14 +43,15 @@ def find_basis_section(text: str) -> str:
 def extract_book_title_refs(text: str) -> list[dict]:
     """提取书名号引用，在同一句内关联文号"""
     results = []
-    seen_titles = set()
+    seen_keys = set()  # 按 title + document_no 组合去重
 
     # 按句子分割（。；！？\n），避免跨句误关联文号
     sentences = re.split(r"[。；！？\n]+", text)
 
     for sentence in sentences:
-        titles_in_sentence = re.findall(r"[《〈]([^》〉]+?)[》〉]", sentence)
-        if not titles_in_sentence:
+        # 使用 finditer 获取每个书名号引用的位置
+        title_matches = list(re.finditer(r"[《〈]([^》〉]+?)[》〉]", sentence))
+        if not title_matches:
             continue
 
         # 从该句提取所有文号
@@ -58,29 +59,29 @@ def extract_book_title_refs(text: str) -> list[dict]:
         for ptn in DOCUMENT_NO_PATTERNS:
             doc_nos_in_sentence.extend(re.findall(ptn, sentence))
 
-        for title in titles_in_sentence:
-            title = title.strip()
+        for m in title_matches:
+            title = m.group(1).strip()
             if not title or len(title) < 2:
                 continue
-            key = title.replace(" ", "").replace("　", "")
-            if key in seen_titles:
-                continue
-            seen_titles.add(key)
+            title_pos = m.start()
 
             # 在句内找到书名号后的第一个文号
             associated_no = ""
-            title_pos = sentence.find(f"《{title}》")
-            if title_pos == -1:
-                title_pos = sentence.find(f"〈{title}〉")
-            if title_pos >= 0:
-                after_title = sentence[title_pos:]
-                for ptn in DOCUMENT_NO_PATTERNS:
-                    m = re.search(ptn, after_title)
-                    if m:
-                        associated_no = m.group(0)
-                        break
+            after_title = sentence[title_pos:]
+            for ptn in DOCUMENT_NO_PATTERNS:
+                dm = re.search(ptn, after_title)
+                if dm:
+                    associated_no = dm.group(0)
+                    break
             if not associated_no and doc_nos_in_sentence:
                 associated_no = doc_nos_in_sentence[-1]
+
+            # 按 title + document_no 组合去重，避免同名不同文号的条目被错误合并
+            key = (title.replace(" ", "").replace("　", ""),
+                   associated_no.replace(" ", "").replace("　", ""))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
 
             results.append({
                 "text": f"《{title}》",

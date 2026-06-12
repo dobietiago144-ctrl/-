@@ -6,7 +6,7 @@ base = "light"
 primaryColor = "#1a73e8"
 
 [server]
-port = 8503
+port = 8501
 headless = true
 address = "0.0.0.0"
 maxUploadSize = 200
