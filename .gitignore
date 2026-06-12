@@ -17,6 +17,9 @@ build/
 .DS_Store
 Thumbs.db
 
+# Uploaded files (user data)
+data/uploads/
+
 # Database (auto-generated)
 *.sqlite
 *.sqlite3
