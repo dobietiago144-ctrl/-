@@ -12,9 +12,18 @@ from modules.reference_extractor import extract_all_references
 from modules.matcher import match_all_references
 from modules.reviewer import review_all, validate_document_metadata
 from modules.report_generator import generate_review_summary, export_report
+from utils.ui import render_app_header, render_process_steps
 
 
-st.title("文档审查")
+render_app_header("文档审查", "识别文档中引用的政策依据并检查有效性")
+
+# 流程步骤条
+current_process_step = 0
+if st.session_state.get("review_results"):
+    current_process_step = 3
+elif st.session_state.get("review_extracted_text"):
+    current_process_step = 1
+render_process_steps(current_process_step)
 
 # 初始化 session_state
 if "review_extracted_text" not in st.session_state:

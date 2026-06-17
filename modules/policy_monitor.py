@@ -1,6 +1,7 @@
-"""政策废止监测模块 — 手动检查官方公开网站，发现废止/失效/替代政策，进入候选池"""
+"""废止/失效依据库模块 — 手动检查官方公开网站，发现废止/失效/替代政策，管理依据库"""
 
 import re
+import json
 import hashlib
 from datetime import datetime
 from urllib.parse import urlparse, urljoin
@@ -19,148 +20,127 @@ from config import (
 # ═══════════════════════════════════════════
 
 def decode_response_content(response) -> str:
-    """稳定解码网页内容，解决中文政府网站乱码问题。
+    """稳定解码网页内容，解决中文政府网站乱码。
 
-    优先级：
-    1. HTTP header Content-Type 中的 charset
-    2. HTML meta charset
-    3. requests apparent_encoding
-    4. 自动尝试 utf-8、gb18030、gbk
-    5. 中文乱码检测 + 换编码重试
-
-    Returns:
-        解码后的 HTML 文本
+    v7.2.1 修复：
+    - 不再盲信 HTTP header/meta 声明的 charset。
+    - 对 utf-8 / gb18030 / gbk 等候选解码结果统一打分。
+    - 遇到“鑷/勬/閮/浜庣//锟斤”等典型乱码时降权。
+    这样可以避免自然资源部部分页面被误解码成乱码标题。
     """
-    content = response.content  # 原始 bytes
-
+    content = response.content
     if not content:
         return ""
 
-    # 1. 从 HTTP header Content-Type 识别 charset
-    charset_from_header = None
-    content_type = response.headers.get("Content-Type", "")
-    ct_match = re.search(r"charset=([^\s;]+)", content_type, re.IGNORECASE)
-    if ct_match:
-        charset_from_header = ct_match.group(1).lower().strip().strip('"').strip("'")
-        # 标准化编码名
-        charset_map = {
-            "gb2312": "gb18030",  # gb2312 用 gb18030 解码更安全
-            "gbk": "gb18030",
-        }
-        charset_from_header = charset_map.get(charset_from_header, charset_from_header)
+    charset_map = {"gb2312": "gb18030", "gbk": "gb18030", "GB2312": "gb18030", "GBK": "gb18030"}
 
-    # 2. 从 HTML meta charset 识别
-    charset_from_meta = None
-    try:
-        # 先用 utf-8 尝试解码前 2048 字节来读取 meta
-        head_sample = content[:2048].decode("utf-8", errors="replace")
-        meta_match = re.search(
-            r'<meta[^>]+charset=["\']?([^"\'\s;>]+)',
-            head_sample, re.IGNORECASE
-        )
-        if meta_match:
-            charset_from_meta = meta_match.group(1).lower().strip()
-            charset_from_meta = charset_map.get(charset_from_meta, charset_from_meta) if 'charset_map' in dir() else charset_from_meta
-            m2 = {"gb2312": "gb18030", "gbk": "gb18030"}
-            charset_from_meta = m2.get(charset_from_meta, charset_from_meta)
-    except Exception:
-        pass
+    candidate_encodings = []
+
+    def add_encoding(enc):
+        if not enc:
+            return
+        enc = str(enc).lower().strip().strip('"').strip("'")
+        enc = charset_map.get(enc, enc)
+        if enc and enc not in candidate_encodings:
+            candidate_encodings.append(enc)
+
+    # 1. header charset
+    content_type = response.headers.get("Content-Type", "") or ""
+    m = re.search(r"charset=([^\s;]+)", content_type, re.IGNORECASE)
+    if m:
+        add_encoding(m.group(1))
+
+    # 2. meta charset: 先分别用 utf-8 / gb18030 尝试读取头部，避免 meta 本身被错解
+    for probe in ("utf-8", "gb18030", "gbk"):
+        try:
+            sample = content[:4096].decode(probe, errors="replace")
+        except Exception:
+            continue
+        m = re.search(r'<meta[^>]+charset=["\']?([^"\'\s;>]+)', sample, re.IGNORECASE)
+        if m:
+            add_encoding(m.group(1))
+        m = re.search(r'<meta[^>]+content=["\'][^"\']*charset=([^"\'\s;>]+)', sample, re.IGNORECASE)
+        if m:
+            add_encoding(m.group(1))
 
     # 3. requests apparent_encoding
-    apparent = None
     try:
-        apparent = response.apparent_encoding
-        if apparent:
-            apparent = apparent.lower()
-            m3 = {"gb2312": "gb18030", "gbk": "gb18030"}
-            apparent = m3.get(apparent, apparent)
+        add_encoding(response.apparent_encoding)
     except Exception:
         pass
 
-    # 4. 按优先级尝试解码
-    candidate_encodings = []
-    seen = set()
-    for enc in [charset_from_header, charset_from_meta, apparent, "utf-8", "gb18030", "gbk"]:
-        if enc and enc not in seen:
-            seen.add(enc)
-            candidate_encodings.append(enc)
-
-    # 再补充可能的编码
-    for enc in ["utf-8", "gb18030", "gbk"]:
-        if enc not in seen:
-            candidate_encodings.append(enc)
+    # 4. 对中文政府网站，utf-8 与 gb18030 都必须参与竞争
+    for enc in ("utf-8", "gb18030", "gbk", "big5"):
+        add_encoding(enc)
 
     best_html = ""
-    best_score = -1
-
-    for encoding in candidate_encodings:
+    best_score = -10**9
+    for enc in candidate_encodings:
         try:
-            decoded = content.decode(encoding)
-        except (UnicodeDecodeError, UnicodeError):
-            try:
-                decoded = content.decode(encoding, errors="replace")
-            except Exception:
-                continue
-
-        # 评分：检查中文质量
+            decoded = content.decode(enc, errors="replace")
+        except Exception:
+            continue
         score = _evaluate_chinese_quality(decoded)
+        # 小幅尊重声明编码，但不能压过明显乱码
+        if enc in ("utf-8", "gb18030"):
+            score += 2
         if score > best_score:
             best_score = score
             best_html = decoded
-            # 高质量直接返回
-            if score >= 90:
-                return best_html
 
-    if best_html:
-        return best_html
-
-    # 最终兜底
-    return content.decode("utf-8", errors="replace")
+    return best_html or content.decode("utf-8", errors="replace")
 
 
 def _evaluate_chinese_quality(text: str) -> int:
-    """评估文本中文质量，返回 0-100 分。
+    """评估中文网页解码质量。
 
-    高分 = 中文质量好，低分 = 乱码
+    高分：包含正常政策网页关键词，中文可读。
+    低分：含替换符、私用区字符、典型 UTF-8/GBK 互转乱码。
     """
     if not text:
         return 0
 
-    total = len(text)
+    total = max(len(text), 1)
+    sample = text[:20000]
 
-    # 统计各类字符
-    chinese_chars = len(re.findall(r"[一-鿿]", text))
-    replacement_chars = text.count("�")  # �
-    # 西欧乱码字符：高ASCII单字节的连续出现（GBK用UTF-8解码的典型乱码）
-    mojibake_pattern = re.findall(r"[èæåäöüéêëîïôœ]{2,}", text)
-    mojibake_chars = sum(len(m) for m in mojibake_pattern)
+    # 基础统计
+    chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", sample))
+    ascii_letters = len(re.findall(r"[A-Za-z]", sample))
+    replacements = sample.count("�")
+    private_use = len(re.findall(r"[\ue000-\uf8ff]", sample))
 
-    # 乱码检测：替换字符过多
-    if total > 0 and replacement_chars > total * 0.1:
-        return 5  # 严重乱码
+    # 政府网站/政策法规常见可读关键词
+    good_keywords = [
+        "自然资源部", "国务院", "政策法规库", "政策法",
+        "名称", "文号", "发布机构", "成文日期", "发布日期",
+        "时效状态", "废止", "失效", "修改", "行政法规",
+        "部门规章", "决定", "公告", "来源", "业务类型",
+    ]
+    good_hits = sum(sample.count(k) for k in good_keywords)
 
-    # 西欧乱码检测
-    if total > 0 and mojibake_chars > total * 0.05:
-        return 10
+    # 典型乱码片段：UTF-8 被 GBK/GB18030 错解、GBK 被 UTF-8 错解
+    bad_tokens = [
+        "鑷", "勬", "簮", "閮", "浜", "庣", "壒", "搴", "熸",
+        "", "", "", "", "鍐", "绔", "锛", "锟", "涓", "冩",
+        "镭", "璧", "荔", "箐", "闊", "另浜", "乚", "竴",
+    ]
+    bad_hits = sum(sample.count(k) for k in bad_tokens)
 
-    # 中文字符比例
-    chinese_ratio = chinese_chars / max(total, 1)
-    if chinese_ratio > 0.15:
-        return 95  # 中文比例正常
-    elif chinese_ratio > 0.05:
-        return 75
-    elif chinese_ratio > 0.01:
-        return 50
+    score = 0
+    score += min(good_hits * 30, 600)
+    score += int((chinese_chars / max(len(sample), 1)) * 300)
+    score += min(chinese_chars // 100, 150)
+    score -= replacements * 8
+    score -= private_use * 12
+    score -= bad_hits * 80
 
-    # 短文本且没有乱码标记 → 给高分
-    if total < 50 and replacement_chars == 0 and mojibake_chars == 0:
-        return 90
+    # 中文网页却几乎没有正常政策关键词，且出现大量罕见乱码，重罚
+    if bad_hits >= 2 and good_hits == 0:
+        score -= 500
+    if replacements > len(sample) * 0.03:
+        score -= 500
 
-    # 没有中文但也没有乱码标记，可能是全英文页面
-    if replacement_chars == 0 and mojibake_chars == 0:
-        return 70
-
-    return 30
+    return score
 
 
 def safe_fetch_html(url: str, timeout: int = 30) -> tuple[str, str]:
@@ -304,7 +284,7 @@ def save_monitor_candidate(data: dict) -> int:
         "candidate_type", "detected_keywords",
         "relation_type_guess", "relation_basis_text",
         "matched_document_id", "matched_title", "confidence",
-        "status", "notes",
+        "status", "notes", "affected_items",  # v7.1.0: affected_items 存储解析出的被废止文件JSON
     ]
     row_data = {k: data.get(k, "") for k in allowed}
     row_data.setdefault("status", "已抓取待确认")
@@ -367,7 +347,7 @@ def update_monitor_candidate(candidate_id: int, data: dict):
         "title", "document_no", "publish_date", "summary", "full_text",
         "candidate_type", "detected_keywords", "relation_type_guess",
         "relation_basis_text", "matched_document_id", "matched_title",
-        "confidence", "status", "notes",
+        "confidence", "status", "notes", "affected_items",  # v7.1.0
     ]
     sets = []
     values = {"id": candidate_id}
@@ -535,11 +515,29 @@ def add_manual_monitor_url(url: str, source_name: str = "手动添加") -> dict:
 
     # 提取被废止旧文件
     obsolete_items = extract_obsolete_items_from_text(full_text)
-    match_affected_items_with_library(obsolete_items)
+    match_affected_items_with_library(obsolete_items, deep_match=False)  # v7.1.0: 仅精确匹配
+
+    # v7.1.0: 提取废止依据段落
+    abrogation_basis = extract_abrogation_basis(full_text)
 
     # 检测关键词
     found_kws = detect_obsolete_keywords(parsed.get("title", "") + " " + full_text)
     relation_guess = guess_relation_type(found_kws, full_text)
+
+    # v7.1.0: 候选类型识别增强
+    title_and_text = parsed.get("title", "") + " " + full_text[:500]
+    if any(kw in title_and_text for kw in ["决定废止", "废止以下", "废止的部门规章"]):
+        candidate_type = "废止决定"
+    elif "废止" in title_and_text:
+        candidate_type = "废止公告"
+    elif "失效" in title_and_text:
+        candidate_type = "失效公告"
+    elif "修订" in title_and_text or "修改" in title_and_text:
+        candidate_type = "修订文件"
+    elif "现行有效" in title_and_text or "规范性文件目录" in title_and_text:
+        candidate_type = "现行有效目录"
+    else:
+        candidate_type = "其他"
 
     preview = {
         "title": parsed.get("title", ""),
@@ -548,11 +546,11 @@ def add_manual_monitor_url(url: str, source_name: str = "手动添加") -> dict:
         "publish_date": parsed.get("publish_date", "") or parsed.get("pass_date", ""),
         "status_from_source": parsed.get("status_from_source", ""),
         "effectiveness_level": parsed.get("effectiveness_level", ""),
-        "candidate_type": "废止公告" if "废止" in parsed.get("title", "") + full_text[:200]
-        else ("失效目录" if "失效" in parsed.get("title", "") + full_text[:200] else "其他"),
+        "candidate_type": candidate_type,
         "detected_keywords": ",".join(found_kws),
         "obsolete_items": obsolete_items,
         "obsolete_count": len(obsolete_items),
+        "abrogation_basis": abrogation_basis,
         "full_text": full_text,
         "parse_warning": parsed.get("parse_warning", ""),
     }
@@ -1139,134 +1137,335 @@ def _extract_issuing_authority_from_text(text: str) -> str:
     return ""
 
 
-def extract_obsolete_items_from_text(text: str) -> list[dict]:
-    """从废止公告/决定正文中提取被废止、失效、替代的旧文件列表。
+def _find_basis_title(text: str) -> str:
+    """从正文中粗略识别依据文件自身标题，用于过滤“把依据标题当成被废止文件”的误判。"""
+    if not text:
+        return ""
+    lines = [ln.strip() for ln in re.split(r"[\r\n]+", text) if ln.strip()]
+    for ln in lines[:80]:
+        cleaned = ln.strip("　 \t")
+        # 不要把“编号 +《文件名》”的清单项当作依据文件自身标题
+        if re.match(r"^(?:[一二三四五六七八九十百]+|[0-9]+)[、.]\s*《", cleaned):
+            continue
+        if re.match(r"^[（(][一二三四五六七八九十百0-9]+[)）]\s*《", cleaned):
+            continue
+        if 6 <= len(cleaned) <= 120 and (
+            ("关于" in cleaned and ("决定" in cleaned or "公告" in cleaned or "通知" in cleaned))
+            or cleaned.endswith("目录")
+        ):
+            # 排除导航、页脚、表格标签
+            if any(bad in cleaned for bad in ["首页", "高级检索", "政策法", "当前位置", "分享到"]):
+                continue
+            return cleaned.replace("《", "").replace("》", "")
+    return ""
 
-    识别编号形式：一、二、三、1. 2. （一）（二） - ● 等后跟《xxx》的模式。
 
-    改进：
-    - 更好地处理中文括号对
-    - 支持从编号行和后续行中提取文件信息
-    - 文号识别更鲁棒
+def _filter_affected_title(title: str, basis_title: str = "") -> bool:
+    """判断解析出来的 title 是否像一个真正的被影响政策名称。"""
+    if not title:
+        return False
+    t = title.strip().strip("《》").strip()
+    if len(t) < 3 or len(t) > 120:
+        return False
+    if re.match(r"^[\d\s\.\-_,，、。；;：:]+$", t):
+        return False
+
+    # 明显的页面噪声
+    noise = [
+        "首页", "政策法", "高级检索", "来源", "名称", "文号", "发布机构",
+        "业务类型", "成文日期", "效力级别", "时效状态", "废止记录",
+        "附件", "相关链接", "打印", "下载", "关闭", "分享到",
+    ]
+    if any(n in t for n in noise):
+        return False
+
+    # 不能把依据文件自身重复解析为被影响文件
+    norm_t = _normalize_title(t) if "_normalize_title" in globals() else re.sub(r"\W+", "", t)
+    norm_basis = _normalize_title(basis_title) if basis_title and "_normalize_title" in globals() else re.sub(r"\W+", "", basis_title or "")
+    if norm_basis and (norm_t == norm_basis or norm_t in norm_basis or norm_basis in norm_t):
+        return False
+
+    # 标题里包含严重乱码时过滤
+    if re.search(r"[�\ue000-\uf8ff]|鑷|勬|簮|閮|庣|||锟|镭|璧|荔|箐", t):
+        return False
+
+    return True
+
+
+def _normalize_policy_text(text: str) -> str:
+    """统一空白、标点和全角符号，便于解析清单。"""
+    if not text:
+        return ""
+    t = text.replace("\r\n", "\n").replace("\r", "\n")
+    t = t.replace("　", " ")
+    t = re.sub(r"[ \t]+", " ", t)
+    # 统一中文序号后的点号
+    t = t.replace("．", ".")
+    return t
+
+
+def _extract_focus_text_for_abrogation(text: str) -> str:
+    """定位真正的废止/失效清单区域。
+
+    优先从“附件2 / 国务院决定废止的行政法规 / 决定废止以下……”等标记后开始，
+    避免把前文中的引用文件、标题或修改条款误当成被废止清单。
     """
-    import re as _re
+    full_text = _normalize_policy_text(text)
+    if not full_text:
+        return ""
 
+    markers = [
+        "国务院决定废止的行政法规",
+        "决定废止的行政法规",
+        "决定废止以下部门规章",
+        "废止以下部门规章",
+        "决定废止以下行政法规",
+        "决定废止以下",
+        "废止以下规范性文件",
+        "废止以下",
+        "予以废止",
+        "宣布失效",
+        "决定宣布失效",
+        "废止的部门规章",
+        "废止或者失效",
+    ]
+
+    starts = [full_text.find(m) for m in markers if full_text.find(m) >= 0]
+    if starts:
+        start = min(starts)
+        # 向前保留少量上下文，便于显示依据段落
+        start = max(0, start - 80)
+        # 向后取较长内容，保证能覆盖附件清单
+        focus = full_text[start:start + 12000]
+        # 遇到明显的页脚/分享区后截断
+        end_markers = ["【字号", "打印", "关闭", "分享到", "相关链接", "网站地图"]
+        cut_points = [focus.find(m) for m in end_markers if focus.find(m) > 500]
+        if cut_points:
+            focus = focus[:min(cut_points)]
+        return focus
+
+    # 找不到标记时，至少避开网页头部，截取正文前半部分
+    return full_text[:8000]
+
+
+def extract_abrogation_basis(text: str) -> str:
+    """从正文中提取废止/失效依据段落。
+
+    v7.2.1: 不再简单按空行找段落，而是先定位清单区域，返回“依据说明 + 清单开头”。
+    """
+    if not text:
+        return ""
+
+    marker_words = [
+        "决定废止", "废止以下", "予以废止", "宣布失效",
+        "决定宣布失效", "废止的部门规章", "废止或者失效",
+        "清理结果", "规范性文件清理", "国务院决定废止的行政法规",
+    ]
+    if not any(m in text for m in marker_words):
+        return ""
+
+    focus = _extract_focus_text_for_abrogation(text)
+    if not focus:
+        return ""
+
+    # 取包含关键标记开始后的前若干行
+    lines = [ln.strip() for ln in focus.splitlines() if ln.strip()]
+    selected = []
+    for ln in lines:
+        if any(k in ln for k in [
+            "决定废止", "废止以下", "予以废止", "宣布失效",
+            "决定修改", "附件", "清理", "现行有效",
+        ]) or re.match(r"^[一二三四五六七八九十]+[、.]", ln):
+            selected.append(ln)
+        if len(selected) >= 12:
+            break
+
+    if selected:
+        return "\n".join(selected)[:3000]
+    return focus[:1500]
+
+
+def _guess_effect_type(text: str) -> str:
+    """根据上下文推断影响类型。"""
+    s = text or ""
+    if "宣布失效" in s or "失效" in s:
+        return "失效"
+    if "修改" in s or "修订" in s:
+        return "修改"
+    if "替代" in s or "代替" in s:
+        return "替代"
+    if "废止" in s:
+        return "废止"
+    return "废止"
+
+
+def _parse_item_info(info: str) -> tuple[str, str, str]:
+    """从括号说明中提取文号、发布日期、发布机关。"""
+    if not info:
+        return "", "", ""
+
+    doc_no = ""
+    publish_date = ""
+    issuer = ""
+
+    no_patterns = [
+        r"([一-鿿]{2,20}令第\d+号)",
+        r"([一-鿿A-Za-z]{2,20}(?:发|办发|函|规|规字|字)\s*[〔\(（\[]?\d{4}[〕\)）\]]?\s*\d+号?)",
+        r"(国发\s*[〔\(（\[]?\d{4}[〕\)）\]]?\s*\d+号?)",
+    ]
+    for pat in no_patterns:
+        m = re.search(pat, info)
+        if m:
+            doc_no = re.sub(r"\s+", "", m.group(1))
+            # 避免从日期尾部误吃进“日”，例如“2001年7月25日国土资源部令第7号”
+            doc_no = re.sub(r"^[年月日]+", "", doc_no)
+            break
+
+    m = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", info)
+    if m:
+        publish_date = f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+
+    # 粗略提取机关：括号内开头到“公布/发布/批准/修订”前
+    m = re.search(r"^([一-鿿、，和及\s]{2,40}?)(?:公布|发布|批准|修订|制定|转发)", info.strip())
+    if m:
+        issuer = re.sub(r"\s+", "", m.group(1).strip("，、 "))
+
+    return doc_no, publish_date, issuer
+
+
+def extract_obsolete_items_from_text(text: str) -> list[dict]:
+    """从废止/失效依据正文中提取“被影响政策清单”。
+
+    v7.2.1 重点修复：
+    1. 支持“附件2 国务院决定废止的行政法规”这类不带《》的编号清单。
+    2. 只在废止/失效清单区域解析，避免把正文引用文件误判为清单。
+    3. 过滤依据文件自身标题，避免把《国务院关于修改和废止部分行政法规的决定》作为第1条被废止文件。
+    """
     if not text:
         return []
 
+    full_text = _normalize_policy_text(text)
+    focus_text = _extract_focus_text_for_abrogation(full_text)
+    basis_title = _find_basis_title(full_text)
+    relation_type = _guess_effect_type(focus_text or full_text)
+
     items = []
-    full_text = text
-    seen_titles = set()
+    seen = set()
 
-    # 编码前缀：中文序号、阿拉伯数字、括号序号、破折号等
-    number_prefixes = (
-        r"(?:[一二三四五六七八九十]+[、．]\s*"
-        r"|[（(][一二三四五六七八九十\d]+[)）]\s*"
-        r"|\d+[.、．]\s*"
-        r"|[—\-—●•·]\s*)"
-    )
-
-    # 模式1: 编号 + 《标题》 + （可选信息）
-    # 注意: info 部分需要排除下一个编号项的情况
-    pattern1 = _re.compile(
-        number_prefixes
-        + r"《(?P<title>[^》]{2,80})》"
-        + r"(?:\s*[（(](?P<info>(?!\s*[一二三四五六七八九十\d]+[)）])[^)）\n]{0,300})[)）])?"
-    )
-
-    for m in pattern1.finditer(full_text):
-        title = m.group("title").strip()
-        info = (m.group("info") or "").strip()
-
-        # 过滤无效标题
-        if not title or len(title) < 3:
-            continue
-        if title in seen_titles:
-            continue
-        # 过滤明显不是文件名的内容
-        if re.match(r"^[\d\s\.\-_,，、。；;：:]+$", title):
-            continue
-
-        seen_titles.add(title)
-
-        doc_no = ""
-        publish_date = ""
-
-        if info:
-            # 文号: 国土资源部令第7号, 自然资源部令第21号
-            # 注意: (?:[年月日]|^) 确保不把日期字符（如"日"）捕获到机构名中
-            no_m = _re.search(r"(?:[年月日]|^)([一-鿿]{2,12}令第\d+号)", info)
-            if not no_m:
-                # 发文字号格式: 自然资发〔2024〕204号
-                no_m = _re.search(
-                    r"([一-鿿A-Za-z]{2,12}(?:发|办发|函|规字)\s*[〔\(（\[]?\d{4}[〕\)）\]]?\d+号?)", info
-                )
-            if no_m:
-                doc_no = no_m.group(1).strip()
-
-            # 日期: 2001年7月25日
-            date_m = _re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", info)
-            if date_m:
-                publish_date = (
-                    f"{int(date_m.group(1)):04d}-"
-                    f"{int(date_m.group(2)):02d}-"
-                    f"{int(date_m.group(3)):02d}"
-                )
-
+    def add_item(title: str, info: str, evidence_text: str):
+        title = (title or "").strip().strip("《》").strip()
+        title = re.sub(r"\s+", "", title) if len(title) <= 30 else re.sub(r"\s+", " ", title)
+        if not _filter_affected_title(title, basis_title=basis_title):
+            return
+        norm = _normalize_title(title) if "_normalize_title" in globals() else title
+        if not norm or norm in seen:
+            return
+        seen.add(norm)
+        doc_no, publish_date, issuer = _parse_item_info(info or "")
         items.append({
             "old_title": title,
             "old_document_no": doc_no,
+            "old_issuer": issuer,
             "old_publish_date": publish_date,
-            "relation_type": "废止",
-            "basis_text": m.group(0).strip()[:300],
+            "relation_type": relation_type,
+            "basis_text": (evidence_text or "").strip()[:500],
             "source_candidate_url": "",
+            "matched": False,
+            "match_status": "未匹配",
+            "match_score": 0,
+            "match_method": "",
         })
 
-    # 模式2: 如果在文本中没找到带编号的《》，尝试直接匹配《xxx》后面跟括号信息
+    # 先处理紧凑写法：1.《文件A》 2.《文件B》 或 （一）《文件A》（二）《文件B》
+    compact_book_pat = re.compile(
+        r"(?:^|\s|\n)(?:[一二三四五六七八九十百]+|[0-9]+)[、.]\s*《(?P<title>[^》]{2,120})》(?P<tail>[^\n《]{0,500})"
+        r"|(?:^|\s|\n)[（(][一二三四五六七八九十百0-9]+[)）]\s*《(?P<title2>[^》]{2,120})》(?P<tail2>[^\n《]{0,500})"
+        r"|(?:^|\s|\n)[\-—●•]\s*《(?P<title3>[^》]{2,120})》(?P<tail3>[^\n《]{0,500})"
+    )
+    for m in compact_book_pat.finditer(focus_text):
+        title = (m.group("title") or m.group("title2") or m.group("title3") or "").strip()
+        tail = (m.group("tail") or m.group("tail2") or m.group("tail3") or "").strip()
+        info_m = re.search(r"[（(](?P<info>[^）)]{0,500})[）)]", tail)
+        add_item(title, info_m.group("info") if info_m else tail, m.group(0))
+
+    # 将清单区域按行处理，优先识别“编号 + 标题 + 括号说明”
+    # 对写在同一行的多个编号，先插入换行，避免只识别第一个。
+    focus_for_lines = re.sub(r"\s+(?=(?:[一二三四五六七八九十百]+|[0-9]+)[、.]\s*)", "\n", focus_text)
+    focus_for_lines = re.sub(r"(?=[（(][一二三四五六七八九十百0-9]+[)）]\s*《)", "\n", focus_for_lines)
+    lines = [ln.strip() for ln in focus_for_lines.splitlines() if ln.strip()]
+    numbered_line_re = re.compile(
+        r"^(?P<num>[一二三四五六七八九十百]+|[0-9]+)[、.]\s*(?P<body>.+)$|^[（(](?P<num2>[一二三四五六七八九十百0-9]+)[)）]\s*(?P<body2>.+)$|^[\-—●•]\s*(?P<body3>.+)$"
+    )
+
+    for ln in lines:
+        m = numbered_line_re.match(ln)
+        if not m:
+            continue
+        body = (m.group("body") or m.group("body2") or m.group("body3") or "").strip()
+        if not body:
+            continue
+
+        # 如果编号后直接是《标题》
+        m_book = re.match(r"《(?P<title>[^》]{2,120})》(?P<tail>.*)$", body)
+        if m_book:
+            title = m_book.group("title")
+            tail = m_book.group("tail")
+            info_m = re.search(r"[（(](?P<info>[^）)]{0,500})[）)]", tail)
+            add_item(title, info_m.group("info") if info_m else tail, ln)
+            continue
+
+        # 普通行政法规/规章清单：标题（说明）
+        # 如：一、中华人民共和国劳动保险条例（1951年2月26日政务院公布）
+        # 标题中可能含有《...》，例如“国务院关于修改《...》第二十一条的决定”
+        title = body
+        info = ""
+        m_info = re.match(r"(?P<title>.+?)[（(](?P<info>[^）)]{0,800})[）)]\s*$", body)
+        if m_info:
+            title = m_info.group("title").strip()
+            info = m_info.group("info").strip()
+
+        # 清理尾部句号
+        title = title.rstrip("。；;，,")
+        add_item(title, info, ln)
+
+    # 如果按行未解析到，再尝试“编号 + 《标题》”跨行模式，但仍限制在 focus_text 内
     if not items:
-        pattern2 = _re.compile(
-            r"《(?P<title>[^》]{3,80})》"
-            r"\s*[（(]?(?P<info>[^)）]{0,300})[)）]?"
-        )
-        for m in pattern2.finditer(full_text):
-            title = m.group("title").strip()
-            info = (m.group("info") or "").strip()
-
-            if title in seen_titles:
-                continue
-            seen_titles.add(title)
-
-            doc_no = ""
-            publish_date = ""
-
-            if info:
-                no_m = _re.search(r"(?:[年月日]|^)([一-鿿]{2,12}令第\d+号)", info)
-                if no_m:
-                    doc_no = no_m.group(1).strip()
-                date_m = _re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", info)
-                if date_m:
-                    publish_date = (
-                        f"{int(date_m.group(1)):04d}-"
-                        f"{int(date_m.group(2)):02d}-"
-                        f"{int(date_m.group(3)):02d}"
-                    )
-
-            items.append({
-                "old_title": title,
-                "old_document_no": doc_no,
-                "old_publish_date": publish_date,
-                "relation_type": "废止",
-                "basis_text": m.group(0).strip()[:300],
-                "source_candidate_url": "",
-            })
+        number_prefix = r"(?:^|\n)\s*(?:[一二三四五六七八九十百]+|[0-9]+)[、.]\s*"
+        pat = re.compile(number_prefix + r"《(?P<title>[^》]{2,120})》(?P<tail>[^\n]{0,500})")
+        for m in pat.finditer(focus_text):
+            title = m.group("title")
+            tail = m.group("tail") or ""
+            info_m = re.search(r"[（(](?P<info>[^）)]{0,500})[）)]", tail)
+            add_item(title, info_m.group("info") if info_m else tail, m.group(0))
 
     return items
 
 
-def match_affected_items_with_library(affected_items: list[dict]) -> list[dict]:
-    """将 affected_items 与文件库匹配。
+def _normalize_title(title: str) -> str:
+    """v7.2.0: 标准化标题 — 去书名号、空格、标点符号，用于第三级匹配"""
+    import re as _re
+    if not title:
+        return ""
+    # 去掉《》书名号
+    t = title.replace("《", "").replace("》", "")
+    # 去掉常见标点和空格
+    # 去掉空白和常见中文/英文标点符号
+    t = _re.sub(r'[\s　，、。．　;；：（）'
+                r'()〔〕\[\]【】“”‘’—―·•]',
+                '', t)
+    return t.strip()
 
-    为每个 item 添加 matched 字段。
+
+def match_affected_items_with_library(affected_items: list[dict], deep_match: bool = False) -> list[dict]:
+    """v7.2.0 四级匹配：将 affected_items 与文件库匹配。
+
+    匹配优先级（从高到低）：
+    1. 文号完全一致 → match_score=1.0, matched=True
+    2. 标题完全一致 → match_score=0.95, matched=True
+    3. 标题标准化后一致（去书名号、空格、标点）→ match_score=0.8, matched=True
+    4. 标题关键词包含匹配 → match_score=0.5-0.7, matched=True, match_method="疑似匹配"
+
+    deep_match=False 时只做第1-2级，deep_match=True 时做全部4级。
     """
     import database.db as db
 
@@ -1274,7 +1473,7 @@ def match_affected_items_with_library(affected_items: list[dict]) -> list[dict]:
         old_title = item.get("old_title", "")
         old_no = item.get("old_document_no", "")
 
-        # 1. 文号精确匹配
+        # 1. 文号精确匹配（最高优先级）
         if old_no:
             existing = db.get_document_by_no(old_no)
             if existing:
@@ -1282,6 +1481,7 @@ def match_affected_items_with_library(affected_items: list[dict]) -> list[dict]:
                 item["matched_id"] = existing["id"]
                 item["matched_title"] = existing["title"]
                 item["match_method"] = "文号精确匹配"
+                item["match_score"] = 1.0
                 continue
 
         # 2. 标题精确匹配
@@ -1292,28 +1492,60 @@ def match_affected_items_with_library(affected_items: list[dict]) -> list[dict]:
                 item["matched_id"] = existing["id"]
                 item["matched_title"] = existing["title"]
                 item["match_method"] = "标题精确匹配"
+                item["match_score"] = 0.95
                 continue
 
-        # 3. 模糊匹配
-        if old_title and len(old_title) >= 8:
+        # 3-4 仅在 deep_match=True 时执行
+        if deep_match and old_title and len(old_title) >= 4:
             all_titles = db.get_all_titles()
-            best = None
+
+            # 3. 标题标准化后匹配（去书名号、空格、标点）
+            normalized_old = _normalize_title(old_title)
+            if normalized_old:
+                for doc in all_titles:
+                    doc_title = doc.get("title", "")
+                    if _normalize_title(doc_title) == normalized_old:
+                        item["matched"] = True
+                        item["matched_id"] = doc["id"]
+                        item["matched_title"] = doc_title
+                        item["match_method"] = "标题标准化匹配"
+                        item["match_score"] = 0.8
+                        break
+
+            if item.get("matched"):
+                continue
+
+            # 4. 标题关键词包含匹配（仅标记为"疑似匹配"）
             for doc in all_titles:
                 doc_title = doc.get("title", "")
-                if doc_title and (old_title in doc_title or doc_title in old_title):
-                    best = doc
-                    break
-            if best:
-                item["matched"] = True
-                item["matched_id"] = best["id"]
-                item["matched_title"] = best["title"]
-                item["match_method"] = "标题模糊匹配"
-                continue
+                if doc_title and len(doc_title) >= 6:
+                    # 双向包含检查
+                    if old_title in doc_title or doc_title in old_title:
+                        item["matched"] = True
+                        item["matched_id"] = doc["id"]
+                        item["matched_title"] = doc_title
+                        item["match_method"] = "疑似匹配（关键词包含）"
+                        item["match_score"] = 0.6
+                        break
+                    # 提取关键词（长度>=4的连续中文字段）
+                    import re as _re
+                    old_keywords = _re.findall(r'[一-鿿]{4,}', old_title)
+                    doc_keywords = _re.findall(r'[一-鿿]{4,}', doc_title)
+                    common = set(old_keywords) & set(doc_keywords)
+                    if len(common) >= 2:
+                        item["matched"] = True
+                        item["matched_id"] = doc["id"]
+                        item["matched_title"] = doc_title
+                        item["match_method"] = "疑似匹配（关键词重叠）"
+                        item["match_score"] = 0.5
+                        break
 
-        item["matched"] = False
-        item["matched_id"] = None
-        item["matched_title"] = ""
-        item["match_method"] = ""
+        if not item.get("matched"):
+            item["matched"] = False
+            item["matched_id"] = None
+            item["matched_title"] = ""
+            item["match_score"] = 0.0
+            item["match_method"] = ""
 
     return affected_items
 
@@ -1359,12 +1591,34 @@ def fetch_candidate_detail(url: str, source: dict) -> dict | None:
     relation_text = detect_relation_basis(text)
     relation_guess = guess_relation_type(keywords_found, text)
 
+    # v7.1.0: 提取废止依据段落
+    abrogation_basis = extract_abrogation_basis(text)
+
+    # v7.1.0: 提取被废止文件并匹配
+    obsolete_items = extract_obsolete_items_from_text(text)
+    match_affected_items_with_library(obsolete_items, deep_match=False)
+
     # 匹配已有文件
     match_result = match_existing_documents(
         title=meta.get("title", ""),
         document_no=meta.get("document_no", ""),
         text=text,
     )
+
+    # v7.1.0: 候选类型识别增强
+    title_and_text = meta.get("title", "") + " " + text[:500]
+    if any(kw in title_and_text for kw in ["决定废止", "废止以下", "废止的部门规章"]):
+        candidate_type = "废止决定"
+    elif "废止" in title_and_text:
+        candidate_type = "废止公告"
+    elif "失效" in title_and_text:
+        candidate_type = "失效公告"
+    elif "修订" in title_and_text or "修改" in title_and_text:
+        candidate_type = "修订文件"
+    elif "现行有效" in title_and_text or "规范性文件目录" in title_and_text:
+        candidate_type = "现行有效目录"
+    else:
+        candidate_type = "其他"
 
     return {
         "title": meta.get("title", ""),
@@ -1373,10 +1627,13 @@ def fetch_candidate_detail(url: str, source: dict) -> dict | None:
         "source_publish_date": "",
         "summary": text[:500] if text else "",
         "full_text": text,
-        "candidate_type": "废止公告" if "废止" in (meta.get("title", "") + text[:200])
-        else ("失效目录" if "失效" in (meta.get("title", "") + text[:200]) else "其他"),
+        "candidate_type": candidate_type,
         "relation_type_guess": relation_guess,
-        "relation_basis_text": relation_text,
+        "relation_basis_text": abrogation_basis or relation_text,  # v7.1.0: 优先用段落定位结果
+        "abrogation_basis": abrogation_basis,
+        "obsolete_items": obsolete_items,
+        "obsolete_count": len(obsolete_items),
+        "affected_items": json.dumps(obsolete_items, ensure_ascii=False) if obsolete_items else "",
         "matched_document_id": match_result.get("matched_id"),
         "matched_title": match_result.get("matched_title", ""),
         "confidence": match_result.get("match_method", ""),

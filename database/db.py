@@ -989,3 +989,103 @@ def clean_document_statuses() -> dict:
 # 保留旧函数名以兼容，内部委托给 migrate_database
 def migrate_review_results_add_columns():
     migrate_database()
+
+
+# ═══════════════════════════════════════════
+#  v7.2.0: status_evidence_items CRUD
+# ═══════════════════════════════════════════
+
+def create_evidence_items(evidence_id: int, items: list[dict]) -> int:
+    """批量保存从依据文件中解析出的具体政策清单。
+
+    每个 item: {affected_title, affected_document_no, affected_issuer,
+                 affected_publish_date, effect_type, evidence_text,
+                 matched_document_id, match_status, match_score, match_method}
+    Returns: 插入条数
+    """
+    if not items:
+        return 0
+    conn = get_connection()
+    cols = [
+        "evidence_id", "affected_title", "affected_document_no",
+        "affected_issuer", "affected_publish_date", "effect_type",
+        "evidence_text", "matched_document_id", "match_status",
+        "match_score", "match_method",
+    ]
+    placeholders = ", ".join([f":{c}" for c in cols])
+    sql = f"INSERT INTO status_evidence_items ({', '.join(cols)}) VALUES ({placeholders})"
+    count = 0
+    for it in items:
+        values = {
+            "evidence_id": evidence_id,
+            "affected_title": it.get("old_title", it.get("affected_title", "")),
+            "affected_document_no": it.get("old_document_no", it.get("affected_document_no", "")),
+            "affected_issuer": it.get("old_issuer", it.get("affected_issuer", "")),
+            "affected_publish_date": it.get("old_publish_date", it.get("affected_publish_date", "")),
+            "effect_type": it.get("relation_type", it.get("effect_type", "废止")),
+            "evidence_text": it.get("basis_text", it.get("evidence_text", ""))[:500],
+            "matched_document_id": it.get("matched_id", it.get("matched_document_id")),
+            "match_status": "已匹配" if it.get("matched") else "未匹配",
+            "match_score": it.get("match_score", 0),
+            "match_method": it.get("match_method", ""),
+        }
+        conn.execute(sql, values)
+        count += 1
+    conn.commit()
+    conn.close()
+    return count
+
+
+def get_evidence_items(evidence_id: int) -> list[dict]:
+    """获取某依据文件的所有解析出政策清单"""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM status_evidence_items WHERE evidence_id = ? ORDER BY id",
+        (evidence_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_pending_import_items() -> list[dict]:
+    """获取所有待补录的政策清单（未匹配的）"""
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT si.*, pc.title as evidence_title, pc.source_url as evidence_url
+           FROM status_evidence_items si
+           JOIN policy_monitor_candidates pc ON si.evidence_id = pc.id
+           WHERE si.match_status = '未匹配'
+           ORDER BY si.created_at DESC
+           LIMIT 200"""
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_evidence_item(item_id: int, data: dict):
+    """更新单条政策清单"""
+    conn = get_connection()
+    allowed = [
+        "matched_document_id", "match_status", "match_score",
+        "match_method", "pending_import_status",
+    ]
+    sets = []
+    values = {"id": item_id}
+    for k in allowed:
+        if k in data:
+            sets.append(f"{k} = :{k}")
+            values[k] = data[k]
+    if sets:
+        sets.append("updated_at = datetime('now','localtime')")
+        sql = f"UPDATE status_evidence_items SET {', '.join(sets)} WHERE id = :id"
+        conn.execute(sql, values)
+        conn.commit()
+    conn.close()
+
+
+def delete_evidence_items(evidence_id: int):
+    """删除某依据文件的所有解析清单"""
+    conn = get_connection()
+    conn.execute("DELETE FROM status_evidence_items WHERE evidence_id = ?", (evidence_id,))
+    conn.commit()
+    conn.close()

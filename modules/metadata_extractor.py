@@ -24,6 +24,120 @@ _META_LABELS = {"标题", "文号", "发文字号", "机构", "正文", "全部"
                 "实施日期", "来源", "下载", "一", "来", "名", "称", "文", "号"}
 
 
+# 常见扫描/OCR异常字符修复（尤其是红头PDF文字层把“临”误抽为“｜｜乞/｜｜伤/｜｜伍”等）
+def _fix_common_ocr_errors(text: str) -> str:
+    """修复政策PDF文字层中的常见OCR/编码噪声。
+
+    说明：很多扫描红头文件的文字层会把“临时用地”中的“临”识别为
+    “｜｜乞”“｜｜伤”“｜｜伍”“｜｜由”“｜｜古”等，导致标题和正文关键词错乱。
+    这里只做低风险替换：仅当异常符号后面紧跟“时用地/时使用/时建设”等短语时替换为“临”。
+    """
+    if not text:
+        return ""
+
+    fixed = text
+
+    # 统一常见竖线变体，便于后续匹配；不直接删除，避免误伤表格。
+    # 仅修复“临时...”相关短语。
+    fixed = re.sub(r"[｜|丨]{1,4}\s*[乞伤伍由古仡屹]?(?=\s*时(?:用地|使用|建设|办公|生活|工棚|期限|审批|管理|信息|申请))", "临", fixed)
+    fixed = re.sub(r"[｜|丨]{1,4}\s*(?=\s*时(?:用地|使用|建设|办公|生活|工棚|期限|审批|管理|信息|申请))", "临", fixed)
+
+    # 常见错误组合直接替换。
+    for bad in ["｜｜乞时", "｜｜伤时", "｜｜伍时", "｜｜由时", "｜｜古时", "||乞时", "||伤时", "||伍时", "||由时", "||古时"]:
+        fixed = fixed.replace(bad, "临时")
+
+    # OCR/排版造成的空格：临 时用地 → 临时用地。
+    fixed = re.sub(r"临\s+时", "临时", fixed)
+
+    # 标点轻度归一，便于标题判断。
+    fixed = fixed.replace("°", "。").replace("｀", "、").replace("-、", "一、")
+    return fixed
+
+
+def _normalize_title_text(title: str) -> str:
+    """对已提取标题做最终清洗。"""
+    if not title:
+        return ""
+    title = _fix_common_ocr_errors(title)
+    title = re.sub(r"\s+", "", title)
+    title = title.strip(" ，。；;、：:《》〈〉\t\n")
+    return title
+
+
+def _normalize_filename_for_metadata(file_name: str | None) -> str:
+    """清洗文件名中的括号/空格，供文号和到期日期兜底识别。"""
+    if not file_name:
+        return ""
+    name = file_name
+    name = name.replace("[", "〔").replace("]", "〕")
+    name = re.sub(r"\s+", "", name)
+    return name
+
+
+def _extract_expiry_from_filename(file_name: str | None) -> str:
+    """从文件名中提取“到期/失效”日期兜底。
+
+    支持：2026.11到期、2026-11到期、2026年11月到期、2026.11.04到期。
+    月份级日期只返回 YYYY-MM，避免伪造具体日。
+    """
+    name = _normalize_filename_for_metadata(file_name)
+    if not name:
+        return ""
+
+    m = re.search(r"(\d{4})[.\-/年](\d{1,2})(?:[.\-/月](\d{1,2})日?)?\s*(?:到期|失效)", name)
+    if not m:
+        return ""
+    y, mo, d = m.group(1), m.group(2), m.group(3)
+    if d:
+        return f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+    return f"{int(y):04d}-{int(mo):02d}"
+
+
+def _looks_like_body_operation_date(text: str, start: int, end: int) -> bool:
+    """判断日期是否只是正文里的业务节点日期，而非文件发布日期/施行日期。"""
+    ctx = text[max(0, start - 80):min(len(text), end + 120)]
+    # 典型："自2022年3月1日起，县（市）自然资源主管部门应当...传至临时用地信息系统完成系统配号"
+    if re.search(r"信息系统|系统配号|上传|传至|填报|报送|批准后\s*\d+\s*个工作日", ctx):
+        return True
+    if re.search(r"应当|负责|督促|完成|更新", ctx) and not re.search(r"(本文件|本通知|本办法|自发布|自印发|自下发|施行|实施|执行|生效|印发|发布)", ctx):
+        return True
+    return False
+
+def _clear_business_only_date(text: str, date_str: str, field: str) -> bool:
+    """已抽出的日期二次校验：如果该日期只出现在业务节点句中，则清空。
+
+    典型误判：正文“自2022年3月1日起，县（市）自然资源主管部门应当在临时用地批准后20个工作日内，
+    将资料传至临时用地信息系统……”不是发布日期/实施日期。
+    """
+    if not date_str or not re.match(r"\d{4}-\d{2}-\d{2}$", date_str):
+        return False
+    y, mo, d = date_str.split("-")
+    mo_i, d_i = str(int(mo)), str(int(d))
+    patterns = [
+        rf"{y}\s*年\s*{mo_i}\s*月\s*{d_i}\s*日",
+        rf"{y}\s*[-/.]\s*0?{mo_i}\s*[-/.]\s*0?{d_i}",
+    ]
+    found_any = False
+    has_release_context = False
+    has_business_context = False
+    for pat in patterns:
+        for m in re.finditer(pat, text):
+            found_any = True
+            ctx = text[max(0, m.start() - 100):min(len(text), m.end() + 140)]
+            if _looks_like_body_operation_date(text, m.start(), m.end()):
+                has_business_context = True
+            # 发布日期必须有明确落款/发布/印发/成文语境；实施日期必须有本文件/本通知级别的施行/实施语境。
+            if field == "publish_date" and re.search(r"(成文日期|发布日期|发布时间|发文日期|印发|发布|下发|办公室|^[^\n]{0,20}(?:部|厅|局|委|办|院|署|会)\s*$)", ctx, re.M):
+                # 排除“向社会公开/公开批准信息”这种业务公开语境。
+                if not re.search(r"(信息系统|系统配号|批准后|传至|上传|填报|报送|向社会公开|公开临时用地批准信息)", ctx):
+                    has_release_context = True
+            if field == "effective_date" and re.search(r"(本文件|本通知|本办法|本规定|本条例).{0,30}(施行|实施|执行|生效)|自.{0,20}起.{0,20}(施行|实施|执行|生效)", ctx):
+                if not re.search(r"(信息系统|系统配号|批准后|传至|上传|填报|报送)", ctx):
+                    has_release_context = True
+    # 找到了该日期，但只呈现业务节点语境，没有发布/施行语境 → 清空。
+    return found_any and has_business_context and not has_release_context
+
+
 def _extract_label_value(text: str, label: str, max_skip: int = 3) -> str | None:
     """查找标签后的值，支持标签分行和多行间隔。"""
     merged = text
@@ -121,6 +235,169 @@ def _is_in_attachment_area(line_idx: int, total_lines: int, text: str) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════
+#  多行标题合并（需求三：PDF红头标题跨行合并）
+# ═══════════════════════════════════════════════════════════
+
+def _compact_text(s: str) -> str:
+    """用于定位的紧凑文本：去掉空白和常见版式符号差异。"""
+    if not s:
+        return ""
+    s = re.sub(r"\s+", "", s)
+    return s.replace("（", "(").replace("）", ")").replace("[", "〔").replace("]", "〕")
+
+
+def _find_doc_no_line_idx(lines: list[str], primary_doc_no: str) -> int:
+    """在保留断行的文本中定位主文号所在行，兼容 PDF 抽取出的空格。"""
+    if not primary_doc_no:
+        return -1
+    target = _compact_text(primary_doc_no)
+    for i, line in enumerate(lines):
+        compact_line = _compact_text(line)
+        if target and target in compact_line:
+            return i
+        # 兜底：有些正则清洗后会丢掉前缀，逐个文号标准化比对
+        for no in _find_all_document_nos(line):
+            if _compact_text(no) == target:
+                return i
+    return -1
+
+
+def _is_recipient_line(line: str) -> bool:
+    """收文对象行，例如“各地级以上市自然资源主管部门：”。"""
+    return bool(re.match(r"^(各地|各市|各县|各区|各省|各有关|各设区|各镇|各有关单位|各直属|各部门).{0,40}[：:]?$", line.strip()))
+
+
+def _looks_like_redhead_title(title: str) -> bool:
+    """判断合并后的文本是否像政策文件主标题。"""
+    if not title:
+        return False
+    title = title.strip(" ，。；;、：:《》〈〉\t\n")
+    if not (8 <= len(title) <= 120):
+        return False
+    if is_attachment_or_form_title(title):
+        return False
+    # 正文句子、引用文件说明不能当主标题
+    if re.match(r"^(为|根据|依据|按照|参照|遵照|落实|贯彻|现就|同时|对于|涉及)", title):
+        return False
+    if "。" in title or "；" in title or "，" in title:
+        return False
+    if re.match(r"^(一|二|三|四|五|六|七|八|九|十)[、.．]", title):
+        return False
+    if re.match(r"^（[一二三四五六七八九十]+）", title):
+        return False
+    # 主标题通常含“关于”，并以通知/意见/办法等收束；“严格规范”这类动宾片段不能单独算完整标题
+    if "关于" in title and re.search(r"(通知|决定|公告|意见|办法|规定|方案|细则|条例|标准|批复|函)$", title):
+        return True
+    if re.search(r"(办法|规定|条例|细则|方案|标准|指南|规范)$", title) and "。" not in title:
+        return True
+    return False
+
+
+def _merge_title_fragments(text: str, lines: list[str], primary_doc_no: str) -> list[dict]:
+    """合并 PDF 中跨行的红头主标题。
+
+    修复点：不能用 text.find(primary_doc_no) 定位，因为 PDF 常把“1号”抽成“1 号”。
+    这里改为在逐行文本中做“去空格后的文号匹配”，然后只取“主文号之后、收文对象之前”
+    的连续短行作为主标题候选，避免正文引用文件抢占标题。
+    """
+    if not primary_doc_no:
+        return []
+
+    no_line_idx = _find_doc_no_line_idx(lines, primary_doc_no)
+    if no_line_idx < 0:
+        return []
+
+    results: list[dict] = []
+
+    meta_label_pattern = re.compile(r"^(文号|发布机构|发布日期|实施日期|标题|名称|来源|全文|正文)$")
+    doc_no_like = re.compile(r"[〔\(（]\s*\d{4}\s*[〕\)）]\s*\d+\s*号")
+
+    # 1. 最可靠：主文号之后，到收文对象之前的连续标题区
+    fragment_lines: list[str] = []
+    for li in range(no_line_idx + 1, min(len(lines), no_line_idx + 8)):
+        line = lines[li].strip()
+        if not line:
+            if fragment_lines:
+                break
+            continue
+        if _is_recipient_line(line):
+            break
+        if meta_label_pattern.match(line):
+            break
+        if is_attachment_or_form_title(line) or re.match(r"^(附件|附表|附录)\d*", line):
+            break
+        if doc_no_like.search(line):
+            break
+        if re.match(r"^\d+$", line):
+            continue
+        if re.match(r"^(一|二|三|四|五|六|七|八|九|十)[、.．]", line):
+            break
+        if re.match(r"^（[一二三四五六七八九十]+）", line):
+            break
+        if len(line) > 70:
+            break
+        # 红头“广东省自然资源厅文件”通常在文号上方，不应进入文号后的标题区；若偶发进入也排除
+        if re.match(r"^[一-鿿]{2,20}文件$", line):
+            continue
+        fragment_lines.append(line)
+
+    # 按 1~4 行尝试合并，优先完整合并结果
+    for end in range(min(4, len(fragment_lines)), 0, -1):
+        merged = "".join(fragment_lines[:end]).strip()
+        if _looks_like_redhead_title(merged):
+            results.append({
+                "title": merged[:120],
+                "source": "首页红头（文号后跨行合并）",
+                "score": 180 + end * 5,
+                "reason": f"主文号后、收文对象前，由{end}行合并",
+                "page_approx": 1,
+                "is_main_title": True,
+                "is_attachment": False,
+            })
+            break
+
+    # 2. 兜底：有的 PDF 文号与标题顺序错乱，再查文号附近上下 6 行的连续窗口
+    start = max(0, no_line_idx - 3)
+    end = min(len(lines), no_line_idx + 7)
+    nearby = []
+    for li in range(start, end):
+        line = lines[li].strip()
+        if not line or _is_recipient_line(line) or doc_no_like.search(line):
+            nearby.append("")
+            continue
+        if re.match(r"^[一-鿿]{2,20}文件$", line):
+            nearby.append("")
+            continue
+        if is_attachment_or_form_title(line) or re.match(r"^(附件|附表|附录)\d*", line):
+            nearby.append("")
+            continue
+        if len(line) > 70 or meta_label_pattern.match(line):
+            nearby.append("")
+            continue
+        nearby.append(line)
+
+    for i in range(len(nearby)):
+        for j in range(min(len(nearby), i + 4), i, -1):
+            parts = nearby[i:j]
+            if not parts or any(not p for p in parts):
+                continue
+            merged = "".join(parts).strip()
+            if _looks_like_redhead_title(merged) and not any(c["title"] == merged for c in results):
+                results.append({
+                    "title": merged[:120],
+                    "source": "首页红头（文号附近合并）",
+                    "score": 145 + len(parts) * 5,
+                    "reason": f"主文号附近由{len(parts)}行合并",
+                    "page_approx": 1,
+                    "is_main_title": True,
+                    "is_attachment": False,
+                })
+                break
+
+    return results
+
+
+# ═══════════════════════════════════════════════════════════
 #  标题候选评分机制
 # ═══════════════════════════════════════════════════════════
 
@@ -132,6 +409,10 @@ def extract_title_candidates(text: str, file_name: str = None) -> list[dict]:
     """
     if not text:
         return []
+
+    # 先修复扫描PDF文字层中的常见OCR噪声，否则标题会出现“｜｜乞时用地”等乱码。
+    text = _fix_common_ocr_errors(text)
+    file_name_for_fallback = _normalize_filename_for_metadata(file_name) if file_name else file_name
 
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     if not lines:
@@ -302,7 +583,7 @@ def extract_title_candidates(text: str, file_name: str = None) -> list[dict]:
 
     # ── 候选来源5：文件名兜底（最低优先级） ──
     if file_name:
-        clean_name = _clean_filename_for_title(file_name)
+        clean_name = _clean_filename_for_title(file_name_for_fallback)
         if clean_name and len(clean_name) >= 4:
             candidates.append({
                 "title": clean_name[:120],
@@ -314,10 +595,18 @@ def extract_title_candidates(text: str, file_name: str = None) -> list[dict]:
                 "is_attachment": False,
             })
 
+    # ── 候选来源1.5：多行标题合并（需求三）──
+    primary_no = _find_primary_doc_no(text, lines)
+    merged_candidates = _merge_title_fragments(text, lines, primary_no)
+    for mc in merged_candidates:
+        # 去重：已存在相同标题的候选则跳过
+        if not any(c["title"] == mc["title"] for c in candidates):
+            candidates.append(mc)
+
     # ── 精算：靠近主文号加分 ──
     # 先从全文提取所有文号
     all_doc_nos = _find_all_document_nos(text)
-    primary_no = _find_primary_doc_no(text, lines)
+    # primary_no 已在上面计算
 
     for cand in candidates:
         if primary_no and primary_no in text[:FRONT_PAGE_CHARS]:
@@ -332,6 +621,49 @@ def extract_title_candidates(text: str, file_name: str = None) -> list[dict]:
             if authority and authority in text[max(0, title_pos - 200):title_pos + 200]:
                 cand["score"] += 20
                 cand["reason"] += "；靠近发文单位"
+
+        # 需求三：多行合并标题优先于单行半截标题
+        if cand.get("source") == "首页红头（多行合并）":
+            cand["score"] += 20  # 完整合并标题加分
+        elif cand.get("source") == "首页红头":
+            # 如果存在多行合并候选，单行半截标题扣分
+            if any(c.get("source") == "首页红头（多行合并）" for c in candidates):
+                cand["score"] -= 10
+
+        # 需求三：正文段落中带《》的引用文件标记为"引用文件"
+        if cand.get("source") == "正文标题" and re.search(r"[《〈].+?[》〉]", cand.get("title", "")):
+            title_in_text = cand["title"]
+            pos_in_text = text.find(title_in_text)
+            if pos_in_text >= 0:
+                ctx = text[max(0, pos_in_text - 50):pos_in_text]
+                if re.search(r"[。；，]", ctx):  # 前有正文标点，说明是段落中的引用
+                    cand["is_main_title"] = False
+                    cand["source"] = "引用文件"
+                    cand["score"] -= 40
+
+        # 需求三：第2页之后的标题若非结构化字段，不得作为主标题
+        if cand.get("page_approx", 1) > 2:
+            if cand.get("source") not in ("结构化字段", "文件名兜底"):
+                cand["is_main_title"] = False
+                cand["score"] -= 30
+
+    # ── 最终清洗标题文本并去重 ──
+    cleaned_candidates = []
+    seen_titles = set()
+    for cand in candidates:
+        cand["title"] = _normalize_title_text(cand.get("title", ""))
+        if not cand["title"]:
+            continue
+        # 清洗后如果仍含明显OCR残留，降权但不直接删除，便于人工兜底。
+        if re.search(r"[｜|丨]{2,}|乞时|伤时|伍时|由时|古时", cand["title"]):
+            cand["score"] -= 40
+            cand["reason"] += "；疑似OCR残留"
+        key = cand["title"]
+        if key in seen_titles:
+            continue
+        seen_titles.add(key)
+        cleaned_candidates.append(cand)
+    candidates = cleaned_candidates
 
     # ── 排序：得分降序，is_main_title 优先 ──
     candidates.sort(key=lambda x: (x["is_main_title"], x["score"]), reverse=True)
@@ -429,6 +761,7 @@ def _find_all_document_nos(text: str) -> list[str]:
             no = re.sub(r"^[^\w一-鿿〔\(（]+", "", no)
             no = re.sub(r"^日(?=[一-鿿]+(?:令|发|函|公告|[〔\(（]))", "", no)
             no = no.replace("\n", "").replace("\r", "")
+            no = no.replace(" ", "").replace("　", "")  # 去除PDF提取引入的空格（半角/全角）
             # 去掉前面可能附带的引用上下文词
             for prefix_word in ["根据", "依据", "参照", "按照", "遵照", "落实", "详见", "参见"]:
                 if no.startswith(prefix_word):
@@ -636,6 +969,7 @@ def extract_issuing_authority(text: str) -> str:
 
 def extract_dates(text: str) -> dict:
     """提取日期信息。优先首页落款日期和文号附近日期，避免附件/引用日期。"""
+    text = _fix_common_ocr_errors(text)
     result = {"publish_date": "", "effective_date": ""}
 
     date_re = re.compile(r"(\d{4})\s*[年/\-.—―－—\-]\s*(\d{1,2})\s*[月/\-.—―－—\-]\s*(\d{1,2})\s*日?")
@@ -664,7 +998,9 @@ def extract_dates(text: str) -> dict:
 
     # 2. "发布"行日期（仅在前部文本）
     if not result["publish_date"]:
-        for m in re.finditer(r"(\d{4})\s*[年/\-.——\-]\s*(\d{1,2})\s*[月/\-.——\-]\s*(\d{1,2})\s*日?\s*(?:发布|施行|实施)", front_text):
+        for m in re.finditer(r"(\d{4})\s*[年/\-.——\-]\s*(\d{1,2})\s*[月/\-.——\-]\s*(\d{1,2})\s*日?\s*(?:发布|印发)", front_text):
+            if _looks_like_body_operation_date(front_text, m.start(), m.end()):
+                continue
             y, mo, d = m.groups()
             result["publish_date"] = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
             break
@@ -672,34 +1008,102 @@ def extract_dates(text: str) -> dict:
     # 3. "实施"行日期
     if not result["effective_date"]:
         for m in re.finditer(r"(\d{4})\s*[年/\-.——\-]\s*(\d{1,2})\s*[月/\-.——\-]\s*(\d{1,2})\s*日?\s*(?:实施|施行|执行|生效)", front_text):
+            if _looks_like_body_operation_date(front_text, m.start(), m.end()):
+                continue
             y, mo, d = m.groups()
             result["effective_date"] = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
             break
 
     # 4. 前部日期列表（兜底，取第一个不被附件污染的日期）
     if not result["publish_date"] or not result["effective_date"]:
-        dates = []
+        publish_dates = []
+        effective_dates = []
         for m in date_re.finditer(front_text):
             y, mo, d = m.groups()
             date_str = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
-            # 排除标题中紧邻的版本年份（如"2018年修订版"紧挨着日期时跳过）
-            ctx_near = front_text[max(0, m.start() - 5):m.end() + 5]
-            if re.search(r"(修订版|年版|版本|修正)", ctx_near):
+            ctx_near = front_text[max(0, m.start() - 60):m.end() + 80]
+            ctx_version = front_text[max(0, m.start() - 5):m.end() + 5]
+            if re.search(r"(修订版|年版|版本|修正)", ctx_version):
                 continue
-            dates.append(date_str)
-            if len(dates) >= 5:
-                break
+            if _looks_like_body_operation_date(front_text, m.start(), m.end()):
+                continue
+            # 只有上下文明确指向发布日期/印发日期时，才作为发布日期兜底。
+            # 另外兼容传统PDF：标题/文号后紧跟一行独立日期（通常位于首页前500字）。
+            line_start = front_text.rfind("\n", 0, m.start()) + 1
+            line_end = front_text.find("\n", m.end())
+            if line_end < 0:
+                line_end = len(front_text)
+            date_line = front_text[line_start:line_end].strip()
+            standalone_front_date = (m.start() < 500 and re.fullmatch(r"\d{4}\s*[年/\-.—―－—\-]\s*\d{1,2}\s*[月/\-.—―－—\-]\s*\d{1,2}\s*日?", date_line or ""))
+            if re.search(r"(发布日期|发布时间|成文日期|印发|发布|下发|发文日期|办公室)", ctx_near) or standalone_front_date:
+                publish_dates.append(date_str)
+            # 只有明确指向施行/执行/生效时，才作为实施日期兜底。
+            if re.search(r"(自.{0,12}起.{0,8}(?:施行|实施|执行|生效)|(?:施行|实施|执行|生效))", ctx_near):
+                effective_dates.append(date_str)
 
-        if not result["publish_date"] and dates:
-            result["publish_date"] = dates[0]
-        if not result["effective_date"] and len(dates) > 1:
-            result["effective_date"] = dates[1]
+        if not result["publish_date"] and publish_dates:
+            result["publish_date"] = publish_dates[0]
+        if not result["effective_date"] and effective_dates:
+            result["effective_date"] = effective_dates[0]
 
     # 5. "自...施行"句式
-    m = re.search(r"自\s*(\d{4})\s*[年/\-.——\-]\s*(\d{1,2})\s*[月/\-.——\-]\s*(\d{1,2})\s*日?\s*(?:施行|实施|执行|生效)", front_text)
-    if m:
+    m = re.search(r"自\s*(\d{4})\s*[年/\-.——\-]\s*(\d{1,2})\s*[月/\-.——\-]\s*(\d{1,2})\s*日?\s*(?:起)?\s*(?:施行|实施|执行|生效)", front_text)
+    if m and not _looks_like_body_operation_date(front_text, m.start(), m.end()):
         y, mo, d = m.groups()
         result["effective_date"] = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+
+    # 6. 文末日期扫描（需求四：部分PDF落款日期在最后一页）
+    if not result["publish_date"] or not result["effective_date"]:
+        tail_text = text[-1500:] if len(text) > FRONT_PAGE_CHARS + 500 else ""
+        if tail_text:
+            # 6a. 发文机关 + 日期格式（如 "广东省自然资源厅 2024年1月8日"）
+            authority_date_re = re.compile(
+                r"([一-鿿]{2,12}(?:部|厅|局|委|办|院|署|会))\s*"
+                r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"
+            )
+            for m_date in authority_date_re.finditer(tail_text):
+                ctx_start = max(0, tail_text.rfind("\n", 0, m_date.start()))
+                ctx_before = tail_text[ctx_start:m_date.start()]
+                # 排除收文对象行
+                if re.search(r"(各地|各市|各县|各省|收文)", ctx_before):
+                    continue
+                y, mo, d = m_date.group(2), m_date.group(3), m_date.group(4)
+                if not result["publish_date"]:
+                    result["publish_date"] = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+                elif not result["effective_date"]:
+                    result["effective_date"] = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+                break
+
+            # 6b. "办公室 ... 印发" 格式
+            if not result["publish_date"]:
+                m_pub = re.search(
+                    r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*(?:印发|发布)",
+                    tail_text
+                )
+                if m_pub:
+                    y, mo, d = m_pub.groups()
+                    result["publish_date"] = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+
+            # 6c. 兜底：从 tail_text 取日期时必须有明确发布/印发/落款上下文。
+            # 不再取“第一个日期”，避免把正文中的系统上线日期（如“自2022年3月1日起……”）误判为发布日期。
+            if not result["publish_date"]:
+                for m_date in date_re.finditer(tail_text):
+                    y, mo, d = m_date.groups()
+                    date_str = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+                    ctx_near = tail_text[max(0, m_date.start() - 80):m_date.end() + 80]
+                    if re.search(r"(修订版|年版|版本|修正|有效期)", ctx_near):
+                        continue
+                    if _looks_like_body_operation_date(tail_text, m_date.start(), m_date.end()):
+                        continue
+                    if not re.search(r"(印发|发布|下发|成文日期|发文日期|办公室|自然资源部\s*$)", ctx_near):
+                        continue
+                    result["publish_date"] = date_str
+                    break
+
+    # 7. 最终二次校验：清理正文业务节点日期误判
+    for _field in ("publish_date", "effective_date"):
+        if _clear_business_only_date(text, result.get(_field, ""), _field):
+            result[_field] = ""
 
     return result
 
@@ -725,6 +1129,7 @@ def _chinese_to_num(s: str) -> int:
 
 def extract_expiry(text: str, dates: dict | None = None) -> str:
     """提取有效期/失效日期。"""
+    text = _fix_common_ocr_errors(text)
     # 1. 显式日期表达式
     m = re.search(r"(?:失效日期|有效期至|至)\s*(\d{4})\D+(\d{1,2})\D+(\d{1,2})", text)
     if m:
@@ -747,6 +1152,17 @@ def extract_expiry(text: str, dates: dict | None = None) -> str:
                 return f"{y:04d}-{mo:02d}-{d:02d}"
         return f"有效期{years}年"
 
+    # 3. "本通知自印发之日起执行，有效期五年" 等无明确日期的有效期表述
+    m = re.search(r"自印发之日.*?起.*?(?:施行|执行|实施).*?有效期\s*(?:为|是)?\s*(\d+|[一二三四五六七八九十]+)\s*年", text)
+    if m:
+        years_str = m.group(1)
+        try:
+            years = int(years_str)
+        except ValueError:
+            years = _chinese_to_num(years_str)
+        if years > 0:
+            return f"有效期{years}年（自印发之日起）"
+
     return ""
 
 
@@ -762,6 +1178,7 @@ def infer_status(text: str, dates: dict, expiry_date: str) -> str:
     - 默认返回"待核实"
     - 仅在有明确证据（网页时效状态标签、明确废止措辞、已过期失效日期）时才判定具体状态
     """
+    text = _fix_common_ocr_errors(text)
     today = (2026, 6, 8)  # 当前日期
 
     # 1. 页面"时效状态"标签最权威
@@ -795,9 +1212,16 @@ def infer_status(text: str, dates: dict, expiry_date: str) -> str:
 
 def extract_all_metadata(text: str, file_name: str = None) -> dict:
     """从文本提取所有元数据。使用新的候选评分机制。"""
+    text = _fix_common_ocr_errors(text or "")
     prefix = text[:MAX_SCAN_CHARS]
-    dates = extract_dates(prefix)
-    expiry = extract_expiry(prefix, dates)
+    dates = extract_dates(text)  # 传入全文，允许扫描文末日期（需求四）
+    expiry = extract_expiry(text, dates)
+
+    # 文件名中带“2026.11到期”等信息时，作为失效日期兜底；避免把正文中的系统上线日期误算成到期日。
+    filename_expiry = _extract_expiry_from_filename(file_name)
+    if filename_expiry:
+        expiry = filename_expiry
+
     status = infer_status(prefix, dates, expiry)
 
     # 使用新的标题提取（带候选信息）
@@ -805,6 +1229,15 @@ def extract_all_metadata(text: str, file_name: str = None) -> dict:
 
     # 使用新的文号提取
     doc_no_result = extract_primary_document_no(text)
+    if (not doc_no_result.get("primary_document_no")) and file_name:
+        name_no = _find_primary_doc_no(_normalize_filename_for_metadata(file_name))
+        if name_no:
+            doc_no_result = {
+                "primary_document_no": name_no,
+                "referenced_document_nos": [],
+                "all_document_nos": [name_no],
+                "source": "文件名文号",
+            }
 
     # 收集附件标题和引用文件
     attachment_titles = _extract_attachment_titles(text)
@@ -885,7 +1318,7 @@ def _clean_filename_for_title(file_name: str) -> str:
     """从文件名清洗出可能的标题。"""
     if not file_name:
         return ""
-    name = file_name.strip()
+    name = _fix_common_ocr_errors(file_name.strip())
     # 去扩展名
     name = re.sub(r"\.(pdf|docx?|xlsx?|txt|doc)$", "", name, flags=re.IGNORECASE)
     # 去日期编号

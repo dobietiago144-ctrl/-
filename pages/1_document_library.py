@@ -30,6 +30,7 @@ from modules.excel_io import (
     generate_import_template, parse_import_excel,
     export_documents_to_excel,
 )
+from utils.ui import render_app_header
 
 # ═══════════ 内联详情视图 ═══════════
 view_doc_id = st.session_state.get("view_doc_id", None)
@@ -285,7 +286,7 @@ if view_doc_id:
     st.stop()
 
 # ═══════════ 政策文件库主页 ═══════════
-st.title("政策文件库")
+render_app_header("政策文件查询", "检索、筛选和维护已入库政策文件")
 
 # ═══════════ 搜索和筛选栏 ═══════════
 # 文件状态筛选框：仅使用标准枚举，不包含"编码有效"等非标准值
@@ -509,224 +510,9 @@ if tab1 is not None:
 
 # --- Tab2: 上传文件 ---
 with tab2:
-    supported_types = get_supported_types()
-    st.caption(f"支持格式：{', '.join(supported_types)}")
+    from modules.batch_upload_ui import render_batch_upload_ui
+    render_batch_upload_ui(uploader_key="policy_file_uploader_lib")
 
-    uploaded_files = st.file_uploader(
-        "选择政策文件（可一次选择多个）",
-        type=supported_types,
-        accept_multiple_files=True,
-        key="policy_file_uploader",
-        label_visibility="collapsed",
-    )
-
-    if uploaded_files:
-        st.info(f"已选择 {len(uploaded_files)} 个文件，正在解析...")
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        def process_one(uf):
-            # 使用 UUID 前缀安全文件名，避免重名覆盖和路径问题
-            safe_name = f"{uuid.uuid4().hex}_{uf.name}"
-            file_path = os.path.join(UPLOADS_DIR, safe_name)
-            with open(file_path, "wb") as f:
-                f.write(uf.read())
-            try:
-                text = parse_file(file_path, pdf_max_pages=15)
-                meta = extract_all_metadata(text)
-                return {"name": uf.name, "path": file_path, "text": text, "meta": meta, "error": None}
-            except Exception as e:
-                return {"name": uf.name, "path": file_path, "text": "", "meta": {}, "error": str(e)}
-
-        pending = []
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            futures = {ex.submit(process_one, uf): uf for uf in uploaded_files}
-            for fut in as_completed(futures):
-                pending.append(fut.result())
-
-        st.session_state["upload_batch"] = pending
-
-    # 显示解析结果，逐一确认入库
-    batch = st.session_state.get("upload_batch", [])
-    if batch:
-        st.markdown("---")
-        st.subheader(f"解析结果（共 {len(batch)} 个文件）")
-
-        for i, item in enumerate(batch):
-            with st.container():
-                if item["error"]:
-                    st.error(f"  {item['name']} — 解析失败: {item['error']}")
-                else:
-                    meta = item["meta"]
-                    text = item["text"]
-                    raw_title = meta.get("title", "")
-
-                    # 标题质量校验
-                    validation = validate_import_candidate(
-                        title=raw_title,
-                        document_no=meta.get("document_no") or "",
-                        text=text,
-                        file_name=item["name"],
-                    )
-
-                    st.markdown(
-                        f"**文件 {i+1}：{item['name']}**"
-                        f"（{len(text)} 字）"
-                    )
-
-                    # 显示验证结果
-                    v_level = validation["level"]
-                    v_color = {"可入库": "green", "待人工确认": "orange", "不建议入库": "red"}.get(v_level, "grey")
-                    st.markdown(
-                        f"标题质量：:<span style='color:{v_color}'>{v_level}</span> "
-                        f"— {validation['reason']}",
-                        unsafe_allow_html=True,
-                    )
-                    if validation.get("suggestion"):
-                        st.caption(f"💡 {validation['suggestion']}")
-
-                    cols = st.columns(4)
-                    with cols[0]:
-                        st.metric("识别标题", raw_title[:20] or "未识别")
-                    with cols[1]:
-                        st.metric("识别文号", meta.get("document_no", "未识别") or "未识别")
-                    with cols[2]:
-                        st.metric("发文单位", meta.get("issuing_authority", "未识别") or "未识别")
-                    with cols[3]:
-                        st.metric("发布日期", meta.get("publish_date", "未识别") or "未识别")
-
-                    with st.expander("查看正文 / 修改元数据并入库"):
-                        st.text_area("", text[:3000], height=150, disabled=True, label_visibility="collapsed")
-
-                        form_key = f"cfm_{i}"
-                        with st.form(form_key):
-                            # 如果标题不合格，强制用户手工修改
-                            default_title = raw_title if validation["valid"] else ""
-                            title = st.text_input(
-                                "文件名称 *",
-                                value=default_title,
-                                key=f"t_{i}",
-                                placeholder="标题识别失败，请手工填写有效文件名称"
-                                if not validation["valid"] else "",
-                            )
-                            # 实时显示当前输入的校验结果
-                            if title.strip() and title.strip() != raw_title:
-                                manual_v = validate_import_candidate(
-                                    title=title.strip(),
-                                    document_no=meta.get("document_no") or "",
-                                    text=text,
-                                    file_name=item["name"],
-                                )
-                                if not manual_v["valid"]:
-                                    st.warning(f"⚠️ {manual_v['reason']} — {manual_v.get('suggestion', '')}")
-                            c1, c2 = st.columns(2)
-                            with c1:
-                                doc_no = st.text_input("文号", value=meta.get("document_no", "") or "", key=f"dn_{i}")
-                                authority = st.text_input("发文单位", value=meta.get("issuing_authority", "") or "", key=f"au_{i}")
-                                pub_date = st.text_input("发布日期", value=meta.get("publish_date", "") or "", key=f"pd_{i}")
-                            with c2:
-                                eff_date = st.text_input("实施日期", value=meta.get("effective_date", "") or "", key=f"ed_{i}")
-                                exp_date = st.text_input("失效日期", value=meta.get("expiry_date", "") or "", key=f"xd_{i}")
-                                s = meta.get("status", "待核实")
-                                st_idx = DOC_STATUS_OPTIONS.index(s) if s in DOC_STATUS_OPTIONS else DOC_STATUS_OPTIONS.index("待核实")
-                                status = st.selectbox("文件状态", DOC_STATUS_OPTIONS, index=st_idx, key=f"st_{i}")
-                            region = st.selectbox("适用地区", REGION_OPTIONS, key=f"rg_{i}")
-                            suggested_cat = classify_document(title.strip() or raw_title, meta.get("document_no", ""), text)
-                            cat_idx = DOC_CATEGORY_OPTIONS.index(suggested_cat) if suggested_cat in DOC_CATEGORY_OPTIONS else DOC_CATEGORY_OPTIONS.index("其他")
-                            category = st.selectbox("文件类别", DOC_CATEGORY_OPTIONS, index=cat_idx, key=f"cg_{i}")
-                            keywords = st.text_input("关键词", key=f"kw_{i}")
-                            auto_bt = classify_business_tags(title.strip() or raw_title, keywords, text)
-                            bt_selected = st.multiselect(
-                                "业务类型", BUSINESS_TYPE_OPTIONS, default=auto_bt, key=f"bt_{i}")
-                            sl = st.selectbox("敏感级别", SENSITIVITY_LEVEL_OPTIONS,
-                                index=0, key=f"sl_{i}")
-                            notes = st.text_input("备注", key=f"nt_{i}")
-
-                            cb1, cb2 = st.columns([1, 6])
-                            with cb1:
-                                # 标题不合格时禁用确认按钮
-                                can_confirm = True
-                                confirm_help = ""
-                                if not title.strip():
-                                    can_confirm = False
-                                    confirm_help = "请填写文件名称"
-                                elif not validation["valid"]:
-                                    # 用户修改后重新校验
-                                    recheck = validate_import_candidate(
-                                        title=title.strip(),
-                                        document_no=doc_no.strip() if doc_no else "",
-                                    )
-                                    if not recheck["valid"]:
-                                        can_confirm = False
-                                        confirm_help = recheck.get("suggestion", "标题不合格，请手工修改")
-                                confirm = st.form_submit_button(
-                                    "确认入库",
-                                    disabled=not can_confirm,
-                                    help=confirm_help if not can_confirm else "",
-                                )
-                            with cb2:
-                                skip = st.form_submit_button("跳过")
-
-                            if confirm:
-                                if "涉密禁止上传" in sl:
-                                    st.error("该级别文件禁止上传本系统")
-                                elif not title.strip():
-                                    st.error("文件名称不能为空")
-                                else:
-                                    policy_path = ""
-                                    if SAVE_POLICY_FILE and os.path.exists(item["path"]):
-                                        dest_name = f"{uuid.uuid4().hex}_{item['name']}"
-                                        policy_dest = os.path.join(POLICY_FILES_DIR, dest_name)
-                                        import shutil
-                                        shutil.copy2(item["path"], policy_dest)
-                                        policy_path = policy_dest
-                                    data = {
-                                        "title": title.strip(),
-                                        "document_no": doc_no.strip() if doc_no else "",
-                                        "issuing_authority": authority.strip() if authority else "",
-                                        "publish_date": pub_date.strip() if pub_date else "",
-                                        "effective_date": eff_date.strip() if eff_date else "",
-                                        "expiry_date": exp_date.strip() if exp_date else "",
-                                        "status": status,
-                                        "region": region,
-                                        "category": category,
-                                        "keywords": keywords.strip() if keywords else "",
-                                        "business_tags": ",".join(bt_selected),
-                                        "sensitivity_level": sl,
-                                        "file_name": item["name"],
-                                        "file_size": (os.path.getsize(item["path"]) if os.path.exists(item["path"]) else 0),
-                                        "file_type": os.path.splitext(item["name"])[1].lstrip("."),
-                                        "full_text": text,
-                                        "source_type": "上传",
-                                        "file_path": policy_path,
-                                        "confirmed": 1,
-                                        "notes": notes.strip() if notes else "",
-                                    }
-                                    doc_id = db.create_document(data)
-                                    db.log_operation({
-                                        "action": "文件上传", "target_type": "document",
-                                        "target_id": doc_id, "file_name": item["name"],
-                                        "sensitivity_level": sl,
-                                    })
-                                    st.session_state["upload_batch"][i] = None
-                                    st.success(f"《{title.strip()}》入库成功！")
-                                    st.rerun()
-
-                            if skip:
-                                st.session_state["upload_batch"][i] = None
-                                st.rerun()
-
-            st.markdown("---")
-
-        # 清理已处理的文件
-        if batch:
-            remaining = [item for item in batch if item is not None]
-            if remaining:
-                st.session_state["upload_batch"] = remaining
-            else:
-                if "upload_batch" in st.session_state:
-                    del st.session_state["upload_batch"]
-                st.success("全部文件处理完毕！")
-                st.rerun()
 
 # --- Tab3: 新增文件 ---
 with tab3:
@@ -1393,7 +1179,7 @@ with tab_folder:
 
 # ═══════════ 文件列表 ═══════════
 st.markdown("---")
-st.subheader("文件列表")
+st.subheader("政策文件列表")
 
 # 分页参数
 if "page_size" not in st.session_state:

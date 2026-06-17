@@ -484,7 +484,8 @@ if view_doc_id:
 
 
 # ═══════════ 政策文件查询主页 ═══════════
-st.title("📚 政策文件查询")
+from utils.ui import render_app_header
+render_app_header("政策文件查询", "检索、筛选和维护已入库政策文件")
 
 # ═══════════ 搜索和筛选栏 ═══════════
 _allowed_statuses = list(DOC_STATUS_OPTIONS)
@@ -900,7 +901,7 @@ if st.session_state.get("show_batch_bt_modal") and st.session_state["selected_id
 
 # ═══════════ 文件列表 ═══════════
 st.markdown("---")
-st.subheader("文件列表")
+st.subheader("政策文件列表")
 
 for doc in docs:
     doc_id = doc["id"]

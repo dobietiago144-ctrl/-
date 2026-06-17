@@ -102,6 +102,7 @@ def extract_document_no_refs(text: str, already_covered: set) -> list[dict]:
     for pattern in DOCUMENT_NO_PATTERNS:
         for m in re.finditer(pattern, text):
             doc_no = m.group(0)
+            doc_no = doc_no.replace(" ", "").replace("　", "")  # 去除PDF提取引入的空格
             if doc_no in seen or doc_no in already_covered:
                 continue
             # 跳过包含已覆盖文号的匹配（正则可能贪婪捕获过多上下文）

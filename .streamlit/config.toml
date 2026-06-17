@@ -10,3 +10,6 @@ port = 8501
 headless = true
 address = "0.0.0.0"
 maxUploadSize = 200
+
+[client]
+toolbarMode = "minimal"

@@ -4,8 +4,9 @@ import streamlit as st
 import pandas as pd
 import database.db as db
 from modules.report_generator import generate_review_summary, export_report
+from utils.ui import render_app_header
 
-st.title("审查历史")
+render_app_header("审查历史", "查看历史审查记录和结果")
 
 tasks = db.get_all_review_tasks(limit=50)
 

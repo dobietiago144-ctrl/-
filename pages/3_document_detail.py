@@ -13,6 +13,7 @@ from modules.metadata_extractor import extract_all_metadata, extract_title_with_
 from modules.document_parser import analyze_document, parse_file_with_structure
 from modules.classifier import classify_business_tags
 from modules.import_validator import is_attachment_title
+from utils.ui import render_app_header
 
 doc_id = st.session_state.get("view_doc_id", None)
 doc = db.get_document(doc_id) if doc_id else None

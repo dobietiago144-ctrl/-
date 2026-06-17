@@ -1,12 +1,13 @@
-"""新旧关系管理页面"""
+"""新旧关系管理页面 — 文件库维护"""
 
 import streamlit as st
 import database.db as db
 from config import RELATION_TYPE_OPTIONS, RELATION_CONFIDENCE_OPTIONS
 from modules.excel_io import export_relations_to_excel
+from utils.ui import render_app_header
 
 
-st.title("新旧关系管理")
+render_app_header("新旧关系", "维护废止文件、现行文件和传承关系")
 
 tab1, tab2, tab3 = st.tabs(["新增关系", "关系列表", "导出关系"])
 

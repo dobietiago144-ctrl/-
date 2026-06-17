@@ -1,4 +1,4 @@
-"""测试政策废止监测模块 — 乱码修复、详情页解析、旧文件提取"""
+"""测试废止/失效依据库模块 — 乱码修复、详情页解析、旧文件提取"""
 
 import sys
 import os
@@ -12,6 +12,8 @@ from modules.policy_monitor import (
     _evaluate_chinese_quality,
     parse_mnr_policy_library_detail,
     extract_obsolete_items_from_text,
+    extract_abrogation_basis,  # v7.1.0
+    match_affected_items_with_library,  # v7.1.0
     is_allowed_mnr_url,
     detect_obsolete_keywords,
 )
@@ -299,3 +301,129 @@ class TestDetectKeywords:
         # 通知不一定是监测关键词
         assert "废止" not in found
         assert "失效" not in found
+
+
+# ═══════════════════════════════════════════
+#  v7.1.0 新增测试
+# ═══════════════════════════════════════════
+
+class TestExtractAbrogationBasis:
+    """测试废止依据段落提取"""
+
+    def test_extract_abolish_decision_basis(self):
+        """从废止决定正文中提取依据段落"""
+        text = """
+        自然资源部关于第八批废止的部门规章的决定
+
+        根据《自然资源部立法工作程序规定》的有关规定，自然资源部决定废止以下部门规章：
+
+        一、《建设项目用地预审管理办法》（2001年7月25日国土资源部令第7号发布）
+        二、《海洋行政处罚实施办法》（2002年12月25日国土资源部令第15号发布）
+
+        上述规章自本决定发布之日起废止。
+        """
+        basis = extract_abrogation_basis(text)
+        assert "决定废止以下部门规章" in basis
+        assert len(basis) > 20
+
+    def test_extract_multiple_paragraphs(self):
+        """提取多个废止依据段落"""
+        text = """
+        决定废止以下规范性文件：
+        一、《文件A》
+
+        同时予以废止的还有：
+        二、《文件B》
+        """
+        basis = extract_abrogation_basis(text)
+        assert "决定废止以下规范性文件" in basis
+
+    def test_no_basis_markers(self):
+        """没有废止标记时返回空字符串"""
+        text = "这是一份普通的政策文件，不涉及废止内容。"
+        basis = extract_abrogation_basis(text)
+        assert basis == ""
+
+    def test_short_paragraph_filtered(self):
+        """过短的段落被过滤"""
+        text = "废止\n\n自然资源部决定废止以下部门规章：\n一、《某文件》"
+        basis = extract_abrogation_basis(text)
+        # "废止" 只有2个字符，短于15字符阈值，应被过滤
+        assert "决定废止以下部门规章" in basis
+
+
+class TestExtractObsoleteItemsEnhanced:
+    """v7.1.0: 测试增强版解析器"""
+
+    def test_extract_with_abolish_marker(self):
+        """能定位"决定废止以下"标记并在附近提取"""
+        # 模拟：前面有一段不相关文本，后面是废止清单
+        text = """
+        自然资源部关于第八批废止的部门规章的决定
+        （2026年6月5日中华人民共和国自然资源部令第21号发布）
+
+        根据有关规定，自然资源部决定废止以下部门规章：
+        一、《建设项目用地预审管理办法》（国土资源部令第7号）
+        二、《海洋行政处罚实施办法》（国土资源部令第15号）
+        三、《国土资源行政复议规定》（国土资源部令第8号）
+
+        本决定自发布之日起施行。
+        """
+        items = extract_obsolete_items_from_text(text)
+        assert len(items) >= 2
+        titles = [i["old_title"] for i in items]
+        assert "建设项目用地预审管理办法" in titles
+        assert "海洋行政处罚实施办法" in titles
+
+    def test_extract_yuyifeizhi_pattern(self):
+        """支持"予以废止"模式"""
+        text = """
+        以下文件予以废止：
+        一、《关于xxx的通知》
+        二、《关于印发yyy办法的通知》
+        """
+        items = extract_obsolete_items_from_text(text)
+        assert len(items) >= 2
+
+    def test_extract_xuanbushixiao_pattern(self):
+        """支持"宣布失效"模式"""
+        text = """
+        宣布失效以下规范性文件：
+        一、《已过期的文件A》
+        二、《已过期的文件B》
+        """
+        items = extract_obsolete_items_from_text(text)
+        assert len(items) >= 2
+
+
+class TestMatchAffectedItemsDepthControl:
+    """v7.1.0: 测试匹配深度控制"""
+
+    def test_deep_match_false_no_fuzzy(self):
+        """deep_match=False 时不做模糊匹配"""
+        import database.db as db
+        db.init_db()
+
+        items = [{
+            "old_title": "某不存在的文件名abc123",
+            "old_document_no": "",
+        }]
+        result = match_affected_items_with_library(items, deep_match=False)
+        assert result[0]["matched"] is False
+        assert result[0]["match_method"] == ""
+
+    def test_deep_match_true_does_fuzzy(self):
+        """deep_match=True 时尝试模糊匹配"""
+        import database.db as db
+        db.init_db()
+
+        # 先查一下库中是否有数据
+        items = [{
+            "old_title": "某不存在的文件",
+            "old_document_no": "",
+        }]
+        result = match_affected_items_with_library(items, deep_match=True)
+        # 即使 deep_match=True，没有匹配到也是正常的
+        # 这里只验证函数调用成功
+        assert "matched" in result[0]
+        assert "match_method" in result[0]

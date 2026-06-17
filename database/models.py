@@ -156,6 +156,28 @@ CREATE TABLE IF NOT EXISTS policy_monitor_candidates (
 );
 """
 
+# v7.2.0: 依据文件解析出的具体政策清单
+CREATE_STATUS_EVIDENCE_ITEMS_TABLE = """
+CREATE TABLE IF NOT EXISTS status_evidence_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    evidence_id INTEGER NOT NULL,
+    affected_title TEXT DEFAULT '',
+    affected_document_no TEXT DEFAULT '',
+    affected_issuer TEXT DEFAULT '',
+    affected_publish_date TEXT DEFAULT '',
+    effect_type TEXT DEFAULT '废止',
+    evidence_text TEXT DEFAULT '',
+    matched_document_id INTEGER,
+    match_status TEXT DEFAULT '未匹配',
+    match_score REAL DEFAULT 0,
+    match_method TEXT DEFAULT '',
+    pending_import_status TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    updated_at TEXT DEFAULT (datetime('now','localtime')),
+    FOREIGN KEY (evidence_id) REFERENCES policy_monitor_candidates(id) ON DELETE CASCADE
+);
+"""
+
 ALL_TABLES = [
     CREATE_DOCUMENTS_TABLE,
     CREATE_RELATIONS_TABLE,
@@ -164,6 +186,7 @@ ALL_TABLES = [
     CREATE_OPERATION_LOGS_TABLE,
     CREATE_POLICY_MONITOR_CANDIDATES_TABLE,
     CREATE_POLICY_MONITOR_IGNORED_URLS_TABLE,
+    CREATE_STATUS_EVIDENCE_ITEMS_TABLE,
 ]
 
 # 部分唯一索引：仅对非空、非空字符串的 document_no 做唯一约束

@@ -7,6 +7,37 @@ from docx import Document
 import requests
 
 
+
+def _fix_pdf_text_common_errors(text: str) -> str:
+    """修复扫描版 PDF 文字层里的常见低风险错字/乱码。
+
+    重点解决自然资源红头扫描件把“临时用地”的“临”抽成“｜｜乞/｜｜伤/｜｜伍/｜｜由/｜｜古”等问题。
+    这里只在“时用地/时使用/时建设/时办公”等固定搭配前替换，尽量避免误伤表格竖线。
+    """
+    if not text:
+        return ""
+    fixed = text
+    # 兼容：｜｜乞时、｜｜ 乞 时、||伤\n时办公 等。
+    fixed = re.sub(
+        r"[｜|丨]{1,4}\s*[乞伤伍由古仡屹]?(?=\s*时(?:用地|使用|建设|办公|生活|工棚|期限|审批|管理|信息|申请))",
+        "临",
+        fixed,
+    )
+    fixed = re.sub(
+        r"[｜|丨]{1,4}\s*(?=\s*时(?:用地|使用|建设|办公|生活|工棚|期限|审批|管理|信息|申请))",
+        "临",
+        fixed,
+    )
+    for bad in [
+        "｜｜乞时", "｜｜伤时", "｜｜伍时", "｜｜由时", "｜｜古时",
+        "||乞时", "||伤时", "||伍时", "||由时", "||古时",
+        "｜｜ 乞时", "｜｜ 伤时", "｜｜ 伍时", "｜｜ 由时", "｜｜ 古时",
+    ]:
+        fixed = fixed.replace(bad, "临时")
+    fixed = re.sub(r"临\s+时", "临时", fixed)
+    fixed = fixed.replace("°", "。").replace("｀", "、")
+    return fixed
+
 def decode_response_content(response) -> str:
     """稳定解码网页内容，解决中文政府网站乱码问题。
 
@@ -146,6 +177,125 @@ def parse_docx(file_path: str) -> str:
     return "\n".join(paragraphs)
 
 
+def _extract_pdf_ocr_hints(file_path: str, page_indices: list[int]) -> str:
+    """可选OCR补充：从PDF首页/末页图片中识别盖章日期、红头标题等关键短文本。
+
+    说明：
+    - 只在本机安装了 tesseract + pytesseract + Pillow 时生效；缺少则静默跳过。
+    - 只OCR首页和末页的少量区域，不做全文OCR，避免拖慢上传。
+    - 主要解决扫描红头PDF文字层没有落款日期、或把“临”识别成异常字符的问题。
+    """
+    # 默认不启用OCR，避免本机未安装 Tesseract 或红章干扰导致日期误识别。
+    # 如确需尝试图片落款日期识别，可在启动前设置环境变量：POLICY_APP_ENABLE_PDF_OCR=1
+    if os.environ.get("POLICY_APP_ENABLE_PDF_OCR", "0") != "1":
+        return ""
+
+    try:
+        import fitz
+        import pytesseract
+        from PIL import Image, ImageFilter
+        import numpy as np
+    except Exception:
+        return ""
+
+    hints: list[str] = []
+
+    def _date_from_ocr(raw: str) -> str:
+        if not raw:
+            return ""
+        t = raw
+        # OCR常把 11 识别成 ll / II / ||，把 年/月/日识别成 #/A/& 等。
+        t = t.replace("｜", "1").replace("|", "1").replace("Ⅰ", "1").replace("I", "1").replace("l", "1")
+        t = t.replace("#", "年").replace("+", "年").replace("¥", "年")
+        t = t.replace("A", "月").replace("a", "月")
+        t = t.replace("&", "日").replace("B", "日")
+        m = re.search(r"(20\d{2})\D{0,6}(\d{1,2})\D{0,6}(\d{1,2})", t)
+        if not m:
+            return ""
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if not (1 <= mo <= 12 and 1 <= d <= 31):
+            return ""
+        return f"{y}年{mo}月{d}日"
+
+    try:
+        doc = fitz.open(file_path)
+    except Exception:
+        return ""
+
+    try:
+        total = doc.page_count
+        valid_pages = []
+        for idx in page_indices:
+            if 0 <= idx < total and idx not in valid_pages:
+                valid_pages.append(idx)
+
+        # 常见盖章/落款位置：页面中下部靠右；同时给一个更宽的中下部区域兜底。
+        zones = [
+            (0.45, 0.35, 0.86, 0.60),
+            (0.48, 0.38, 0.78, 0.52),
+            (0.35, 0.30, 0.95, 0.70),
+        ]
+        for pi in valid_pages:
+            page = doc[pi]
+            try:
+                pix = page.get_pixmap(matrix=fitz.Matrix(4, 4), alpha=False)
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            except Exception:
+                continue
+
+            for z in zones:
+                box = (
+                    int(img.width * z[0]), int(img.height * z[1]),
+                    int(img.width * z[2]), int(img.height * z[3]),
+                )
+                crop = img.crop(box)
+
+                # 一版原图OCR，一版只保留黑/灰文字（用于从红章中分离落款日期）。
+                ocr_images = [crop]
+                try:
+                    arr = np.array(crop)
+                    r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
+                    gray = (r.astype(float) + g.astype(float) + b.astype(float)) / 3
+                    mask = (
+                        (gray < 170)
+                        & (abs(r.astype(int) - g.astype(int)) < 60)
+                        & (abs(g.astype(int) - b.astype(int)) < 60)
+                    )
+                    bw = np.where(mask, 0, 255).astype("uint8")
+                    bw_img = Image.fromarray(bw, "L").resize((crop.width * 2, crop.height * 2)).filter(ImageFilter.MedianFilter(3))
+                    ocr_images.append(bw_img)
+                except Exception:
+                    pass
+
+                for im in ocr_images:
+                    for psm in (6, 11):
+                        try:
+                            raw = pytesseract.image_to_string(im, lang="chi_sim+eng", config=f"--psm {psm}")
+                        except Exception:
+                            continue
+                        date_text = _date_from_ocr(raw)
+                        if date_text:
+                            hints.append(f"OCR落款日期：自然资源部 {date_text}")
+                            raise StopIteration
+            # Continue next page if no date
+    except StopIteration:
+        pass
+    except Exception:
+        pass
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
+
+    # 去重
+    uniq = []
+    for h in hints:
+        if h not in uniq:
+            uniq.append(h)
+    return "\n".join(uniq)
+
+
 def parse_pdf(file_path: str, max_pages: int = 0, use_blocks: bool = True) -> str:
     """解析 PDF 文件。max_pages=0 表示全部页面。
 
@@ -174,7 +324,12 @@ def parse_pdf(file_path: str, max_pages: int = 0, use_blocks: bool = True) -> st
 
     total = doc.page_count
     doc.close()
-    return "\n".join(pages)
+    text = _fix_pdf_text_common_errors("\n".join(pages))
+    # OCR补充首页/末页关键区域（有则追加，无则不影响）。
+    ocr_hints = _extract_pdf_ocr_hints(file_path, [0, 1, total - 2, total - 1])
+    if ocr_hints:
+        text = text + "\n" + ocr_hints
+    return text
 
 
 def parse_file_with_structure(file_path: str, pdf_max_pages: int = 0) -> dict:
@@ -233,8 +388,12 @@ def parse_file_with_structure(file_path: str, pdf_max_pages: int = 0) -> dict:
                 front_texts.append(page_text)
         doc.close()
 
-        result["full_text"] = "\n".join(all_page_texts)
-        result["front_text"] = "\n".join(front_texts)
+        full_text = _fix_pdf_text_common_errors("\n".join(all_page_texts))
+        ocr_hints = _extract_pdf_ocr_hints(file_path, [0, 1, total - 2, total - 1])
+        if ocr_hints:
+            full_text = full_text + "\n" + ocr_hints
+        result["full_text"] = full_text
+        result["front_text"] = _fix_pdf_text_common_errors("\n".join(front_texts)) + (("\n" + ocr_hints) if ocr_hints else "")
 
     elif ext == ".docx":
         result["parse_info"]["parser"] = "docx"
